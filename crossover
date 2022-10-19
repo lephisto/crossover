@@ -1,0 +1,414 @@
+#!/bin/bash
+
+#set -x
+
+# Cross Pool Migration Tool for Proxmox VMs using Ceph.
+# Author: Bastian Mäuser <bma@netz.org>        
+
+declare -r VERSION=0.1
+declare -r NAME=$(basename "$0")
+declare -r PROGNAME=${NAME%.*}
+
+declare -r PVE_DIR="/etc/pve"
+declare -r PVE_NODES="$PVE_DIR/nodes"
+declare -r QEMU='qemu-server'
+declare -r QEMU_CONF_CLUSTER="$PVE_NODES/*/$QEMU"
+declare -r EXT_CONF='.conf'
+
+declare -r LOG_FILE=$(mktemp)
+
+declare -A -g pvnode
+
+declare opt_destination
+declare opt_vm_ids=''
+declare -i opt_debug=0
+declare -i opt_dry_run=0
+declare -i opt_syslog=0
+declare -i opt_lock=1
+declare -i opt_keeplock=0
+declare -i opt_overwrite=0
+
+declare -r redstconf='^\/etc\/pve\/nodes\/(.*)\/qemu-server\/([0-9]+).conf$'
+declare -r recephimg='([a-zA-Z0-9]+)\:(.*)'
+
+function usage(){
+   shift
+
+    if [ "$1" != "--no-logo" ]; then
+        cat << EOF
+ _____                                 
+|     |___ ___ ___ ___ ___ _ _ ___ ___ 
+|   --|  _| . |_ -|_ -| . | | | -_|  _|
+|_____|_| |___|___|___|___|\_/|___|_|  
+
+EOF
+    fi
+
+    cat << EOF
+Proxmox Mirror tool for Ceph and Proxmox
+
+Usage:
+    $PROGNAME <COMMAND> [ARGS] [OPTIONS]
+    $PROGNAME help
+    $PROGNAME version
+ 
+    $PROGNAME mirror     --vmid=<string> --destination=<destionationhost>
+Commands:
+    version              Show version program
+    help                 Show help program
+    mirror               Relpicate a stopped VM to another Cluster (full clone)
+
+Options:
+    --vmid               The ID of the VM/CT, comma separated (es. 100,101,102), 
+                         'all-???' for all known guest systems in specific host (es. all-pve1, all-\$(hostname)),
+                         'all' for all known guest systems in cluster,
+                         'storage-???' storage Proxmox VE (pool Ceph) 
+    --destination        'Target PVE Host
+    --pool               'Target Ceph Pool
+    --nolock             'Don't lock source VM on Transfer
+    --keeplock           'Keep source VM locked on Transfer
+    --overwrite          'Overwrite Destination
+    --debug              'Show Debug Output
+
+Report bugs to <mephisto@mephis.to>
+
+EOF
+    exit 1
+}
+
+function parse_opts(){
+#    local action=$1
+    shift
+
+    local args
+    args=$(getopt \
+           --options '' \
+           --longoptions=vmid:,destination:,pool:,nolock,keeplock,overwrite,dry-run,debug \
+           --name "$PROGNAME" \
+           -- "$@") \
+           || end_process 128
+
+    eval set -- "$args"
+
+    while true; do    
+      case "$1" in
+        --vmid) opt_vm_ids=$2; shift 2;;
+        --destination) opt_destination=$2; shift 2;;
+        --pool) opt_pool=$2; shift 2;;
+        --dry-run) opt_dry_run=1; shift;;
+        --debug) opt_debug=1; shift;;
+        --nolock) opt_lock=0; shift;;
+        --keeplock) opt_keeplock=1; shift;;
+        --overwrite) opt_overwrite=1; shift;;
+        --) shift; break;;
+        *) break;;
+      esac
+    done
+
+    if [ $opt_debug -eq 1 ]; then
+        log info "============================================"
+        log info "Proxmox Crosspool Migration: $VERSION";
+        log info "============================================"
+        log info "Proxmox VE Version:"
+
+        pveversion
+
+        log info "============================================"
+    fi
+
+    [ -z "$opt_vm_ids" ] && { log info "VM id is not set."; end_process 1; }
+
+    if [ "$opt_vm_ids" = "all" ]; then
+        #all in cluster
+
+        local data=''
+        data=$(get_vm_ids "$QEMU_CONF_CLUSTER/*$EXT_CONF")
+        vm_ids=$(echo "$data" | tr ',' '\n')
+
+    elif [[ "$opt_vm_ids" == "all-"* ]]; then
+        #all in specific host
+
+        local host=${opt_vm_ids#*-}
+        
+        if ! exist_file "$PVE_NODES/$host"; then
+            log info "Host not found!"
+            end_process 1
+        fi
+
+        local data=''
+        data=$(get_vm_ids "$PVE_NODES/$host/$QEMU/*$EXT_CONF")
+        [ -z "$data" ] && { log info "VM id is not set."; end_process 1; }
+
+        vm_ids=$(echo "$data" | tr ',' '\n')
+
+    elif [[ "$opt_vm_ids" == "storage-"* ]]; then
+        #all in specific storage (pool Ceph)
+
+        local storage=${opt_vm_ids#*-}
+
+        if ! pvesm list "$storage" > /dev/null 2>&1; then    
+            log info "Pool '$storage' not found in Proxmox VE storage." 
+            end_process 1
+        fi
+
+        vm_ids=$(pvesm list "$storage" | awk '{print $4}' | awk '!a[$0]++' )
+
+    else
+        #comma separated
+        vm_ids=$(echo "$opt_vm_ids" | tr ',' "\n")
+    fi
+
+}
+
+function map_vmids_to_host(){
+    for node in $(/usr/bin/pvecm nodes | tail +5 | tr -s ' ' | cut -d' ' -f 4)
+    do
+        for vm in $(ssh root@$node qm list|tail +2|tr -s ' '|cut -f 2 -d' ')
+        do
+            pvnode[$vm]=$node
+        done
+    done
+}
+
+function exist_file(){
+    local file=''
+    for file in $1; do
+        [ -e "$file" ] && return 0 || return 1
+        break
+    done
+}
+
+function get_vm_ids(){
+    local data=''
+    local conf=''
+
+    while [ $# -gt 0 ]; do
+        for conf in $1; do
+            [ ! -e "$conf" ] && break
+
+            conf=$(basename "$conf")
+            [ "$data" != '' ] && data="$data,"
+            data="$data${conf%.*}"
+        done
+        shift
+    done
+
+    echo "$data"
+}
+
+function get_config_file(){
+    local file_config=''
+
+    if exist_file "$QEMU_CONF_CLUSTER/$vm_id$EXT_CONF"; then
+        file_config=$(ls $QEMU_CONF_CLUSTER/$vm_id$EXT_CONF)
+
+    else
+        log error "VM $vm_id - Unknown technology or VMID not found: $QEMU_CONF_CLUSTER/$vm_id$EXT_CONF"
+        end_process 128
+    fi 
+
+    echo "$file_config"
+}
+
+function get_disks_from_config(){
+    local disks;
+    local file_config=$1
+
+    #disks available for vm/ct
+    #exclude no backup
+    #read current config
+    disks=$(while read -r line; do
+                [[ "$line" == "" ]] && break
+                echo "$line" 
+            done < "$file_config" | \
+            grep -P '^(?:((?:virtio|ide|scsi|sata|mp)\d+)|rootfs): ' | \
+            grep -v -P 'cdrom|none' | \
+            grep -v -P 'backup=0' | \
+            awk '{ split($0,a,","); split(a[1],b," "); print b[2]}')
+
+    echo "$disks"
+}
+
+function log(){
+    local level=$1
+    shift 1
+    local message=$*
+
+    case $level in
+        debug) 
+            if [ $opt_debug -eq 1 ]; then
+                echo -e "$(date "+%F %T") DEBUG: $message";
+                echo -e "$(date "+%F %T") DEBUG: $message" >> "$LOG_FILE";
+            fi    
+            ;;
+
+        info) 
+            echo -e "$message"; 
+            echo -e "$message" >> "$LOG_FILE";
+            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" "$message"
+            ;;
+
+        warn)
+            echo "WARNING: $message" 1>&2
+            echo -e "$message" >> "$LOG_FILE";            
+            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" -p daemon.warn "$message"
+            ;;
+        
+        error)
+            echo "ERROR: $message" 1>&2
+            echo -e "$message" >> "$LOG_FILE";            
+            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" -p daemon.err "$message"
+            ;;
+
+        *)  
+            echo "$message" 1>&2
+            echo -e "$message" >> "$LOG_FILE";            
+            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" "$message"
+            ;;
+    esac
+}
+
+# Do offline Mirror of a VM to another Procmox Ceph Cluster 
+function mirror() {
+    local -i rc=0;
+    local vmname
+    parse_opts "$@"
+
+    log info "ACTION: Mirror"
+    log info "Start mirror $(date "+%F %T")"
+
+    #create pid file
+    local pid_file="/var/run/$PROGNAME.pid"
+    if [[ -e "$pid_file" ]]; then
+        local pid; pid=$(cat "${pid_file}")
+        if ps -p "$pid" > /dev/null 2>&1; then
+          log error "Process already running with pid ${pid}"
+          end_process 1
+        fi
+    fi
+
+    map_vmids_to_host
+
+    for vm_id in $vm_ids; do
+        local file_config; file_config=$(get_config_file)
+        [ -z "$file_config" ] && continue
+        local disk=''
+        
+        log debug "Checking for VM on Destination Host $opt_destination $QEMU_CONF_CLUSTER"
+        conf_on_destination=$(ssh root@$opt_destination "ls -d $QEMU_CONF_CLUSTER/$vm_id$EXT_CONF 2>/dev/null")
+        [[ "$conf_on_destination" =~ $redstconf ]]
+        host_on_destination=${BASH_REMATCH[1]}
+        echo "Host on destination: $host_on_destination"
+
+        status=$(ssh root@${pvnode[$vm_id]} qm status $vm_id|cut -d' ' -f 2)
+        if [ $status == "running" ]; then
+            echo "Source VM is running .. exiting"
+            end_process 1
+        fi
+
+        if [ $opt_lock -eq 1 ]; then
+            ssh root@${pvnode[$vm_id]} qm set $vm_id --lock backup
+        fi
+        if [ -z "$host_on_destination" ]; then
+            log info "VMID not present on remote host, transmitting"
+            scpjob="scp $PVE_NODES/${pvnode[$vm_id]}/$QEMU/$vm_id.conf $opt_destination:$PVE_NODES/$opt_destination/$QEMU/$vm_id.conf"
+            if ! do_run "$scpjob"; then
+                log error "Transmitting VM Configuration failed"
+                end_process 1
+            fi
+        fi
+        for disk in $(get_disks_from_config "$file_config"); do
+            log debug "VMID: $vm_id Disk: $disk"
+            image_spec=$(get_image_spec "$disk")
+            [[ $disk =~ $recephimg ]]
+            image_name=${BASH_REMATCH[2]}
+            [ -z "$image_spec" ] && continue
+            chkjob=$(ssh $opt_destination rbd ls -l $opt_pool|grep $image_name|wc -l)
+            if [ $chkjob -gt 0 ] && [ $opt_overwrite -eq 0 ]; then
+                log error "Image $opt_pool/$image_name exists on destination, no permission to --overwrite"
+            else
+                if [ $chkjob -gt 0 ] && [ $opt_overwrite -eq 1 ]; then
+                    deljob=$(ssh $opt_destination rbd rm $opt_pool/$image_name)
+                fi
+                xmitjob="rbd export --rbd-concurrent-management-ops 8 $image_spec -|pv -r|ssh $opt_destination rbd import --image-format 2 - $opt_pool/$image_name"
+                if ! do_run $xmitjob; then
+                    log error "Transmitting Image failed"
+                fi
+            fi
+        done
+        if [ ! $opt_keeplock -eq 1 ]; then
+            ssh root@${pvnode[$vm_id]} qm unlock $vm_id
+            log info "Unlocking VM $vm_id"
+        fi
+    done
+}
+
+
+function do_run(){
+    local cmd=$*;
+    local -i rc=0;
+
+    if [ $opt_dry_run -eq 1 ]; then
+        echo "$cmd"
+        rc=$?
+    else
+        log debug "$cmd"
+        eval "$cmd"
+        rc=$?
+        [ $rc != 0 ] && log error "$cmd"
+        log debug "return $rc ps ${PIPESTATUS[@]}"
+    fi
+
+    return $rc
+}
+
+function end_process(){
+    local -i rc=$1;
+#    if ! [[ -z "$startts" && -z "$endts" ]]; then
+#        local -i runtime=$(expr $endts - $startts)
+#        local -i bps=$(expr $bytecount/$runtime)
+#    fi
+#    local subject="Ceph [VM:$vmok/$vmtotal SS:$snapshotok/$snapshottotal EX:$exportok/$exporttotal] [$(bytesToHuman "$bytecount")@$(bytesToHuman "$bps")/s]"
+#    [ $rc != 0 ] && subject="$subject [ERROR]"
+
+    #send email
+#    local mail;
+#    local mailhead="Backup $imgcount Images in $vmcount VMs (Bytes: $bytecount)"
+#    for mail in $(echo "$opt_addr_mail" | tr "," "\n"); do
+#        do_run "cat '$LOG_FILE' | mail -s '$subject' '$mail'"
+#    done
+
+    #remove log
+#    rm "$LOG_FILE"
+
+    exit "$rc";
+}
+
+function get_image_spec(){
+    local image_spec;
+    local disk="$1"
+    
+    #if krbd enable
+    image_spec=$(pvesm path "$disk" | grep '^/dev/rbd/' | sed -e "s/^\/dev\/rbd\///")
+    if [ -z "$image_spec" ]; then
+        image_spec=$(pvesm path "$disk" | grep '/ceph/' | awk '{ split($0,a,":"); print a[2]}')
+    fi
+
+    echo "$image_spec"
+}
+
+function main(){    
+    [ $# = 0 ] && usage;
+
+    #command
+    case "$1" in
+        version) echo "$VERSION";;
+        help) usage "$@";;
+        mirror) mirror "$@";; 
+        *) usage;;
+    esac
+
+    exit 0;
+}
+
+main "$@"
