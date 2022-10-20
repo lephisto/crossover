@@ -30,6 +30,7 @@ declare -i opt_overwrite=0
 
 declare -r redstconf='^\/etc\/pve\/nodes\/(.*)\/qemu-server\/([0-9]+).conf$'
 declare -r recephimg='([a-zA-Z0-9]+)\:(.*)'
+declare -r resnapname='.*@mirror-(.*)'
 
 function usage(){
    shift
@@ -45,7 +46,7 @@ EOF
     fi
 
     cat << EOF
-Proxmox Mirror tool for Ceph and Proxmox
+Mirror tool Proxmox VMs on Ceph storages
 
 Usage:
     $PROGNAME <COMMAND> [ARGS] [OPTIONS]
@@ -56,7 +57,8 @@ Usage:
 Commands:
     version              Show version program
     help                 Show help program
-    mirror               Relpicate a stopped VM to another Cluster (full clone)
+    mirror               Replicate a stopped VM to another Cluster (full clone)
+    onlinemirror         Mirror a running VM to another Cluster (incremental)
 
 Options:
     --vmid               The ID of the VM/CT, comma separated (es. 100,101,102), 
@@ -271,7 +273,7 @@ function log(){
 # Do offline Mirror of a VM to another Procmox Ceph Cluster 
 function mirror() {
     local -i rc=0;
-    local vmname
+#    local vmname
     parse_opts "$@"
 
     log info "ACTION: Mirror"
@@ -302,28 +304,26 @@ function mirror() {
 
         status=$(ssh root@${pvnode[$vm_id]} qm status $vm_id|cut -d' ' -f 2)
         if [ $status == "running" ]; then
-            echo "Source VM is running .. exiting"
+            log error "Source VM is running .. exiting"
             end_process 1
         fi
 
-        if [ $opt_lock -eq 1 ]; then
-            ssh root@${pvnode[$vm_id]} qm set $vm_id --lock backup
-        fi
         if [ -z "$host_on_destination" ]; then
-            log info "VMID not present on remote host, transmitting"
-            scpjob="scp $PVE_NODES/${pvnode[$vm_id]}/$QEMU/$vm_id.conf $opt_destination:$PVE_NODES/$opt_destination/$QEMU/$vm_id.conf"
-            if ! do_run "$scpjob"; then
-                log error "Transmitting VM Configuration failed"
-                end_process 1
-            fi
+            log info "Config for $vm_id not present on remote host, transmitting"
+            rewriteconfig $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf $opt_destination "$opt_pool" $PVE_NODES/"$opt_destination"/$QEMU/"$vm_id".conf
         fi
+
+        if [ $opt_lock -eq 1 ]; then
+            ssh root@"${pvnode[$vm_id]}" qm set "$vm_id" --lock backup
+        fi
+        
         for disk in $(get_disks_from_config "$file_config"); do
             log debug "VMID: $vm_id Disk: $disk"
             image_spec=$(get_image_spec "$disk")
             [[ $disk =~ $recephimg ]]
             image_name=${BASH_REMATCH[2]}
             [ -z "$image_spec" ] && continue
-            chkjob=$(ssh $opt_destination rbd ls -l $opt_pool|grep $image_name|wc -l)
+            chkjob=$(ssh "$opt_destination" rbd ls -l $opt_pool|grep $image_name|wc -l)
             if [ $chkjob -gt 0 ] && [ $opt_overwrite -eq 0 ]; then
                 log error "Image $opt_pool/$image_name exists on destination, no permission to --overwrite"
             else
@@ -343,6 +343,158 @@ function mirror() {
     done
 }
 
+function onlinemirror() {
+    local -i rc=0;
+    local vmname
+    parse_opts "$@"
+
+    local timestamp; timestamp=$(date +%Y%m%d%H%M%S)
+
+    log info "ACTION: Onlinemirror"
+    log info "Start mirror $(date "+%F %T")"
+
+    #create pid file
+    local pid_file="/var/run/$PROGNAME.pid"
+    if [[ -e "$pid_file" ]]; then
+        local pid; pid=$(cat "${pid_file}")
+        if ps -p "$pid" > /dev/null 2>&1; then
+          log error "Process already running with pid ${pid}"
+          end_process 1
+        fi
+    fi
+
+    map_vmids_to_host
+
+    for vm_id in $vm_ids; do
+        local file_config; file_config=$(get_config_file)
+        [ -z "$file_config" ] && continue
+        local disk=''
+        
+        log debug "Checking for VM on Destination Host $opt_destination $QEMU_CONF_CLUSTER"
+        conf_on_destination=$(ssh root@$opt_destination "ls -d $QEMU_CONF_CLUSTER/$vm_id$EXT_CONF 2>/dev/null")
+        [[ "$conf_on_destination" =~ $redstconf ]]
+        host_on_destination=${BASH_REMATCH[1]}
+        echo "Host on destination: $host_on_destination"
+
+        if [ -z "$host_on_destination" ]; then
+            log info "Config for $vm_id not present on remote host, transmitting"
+            rewriteconfig $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf $opt_destination "$opt_pool" $PVE_NODES/"$opt_destination"/$QEMU/"$vm_id".conf
+        fi
+        if [ $opt_lock -eq 1 ]; then
+            ssh root@"${pvnode[$vm_id]}" qm set "$vm_id" --lock backup
+        fi
+
+        #Take Snapshot
+        vm_freeze "$vm_id" "${pvnode[$vm_id]}"
+        for disk in $(get_disks_from_config "$file_config"); do
+            image_spec=$(get_image_spec "$disk")
+            current_snap="$image_spec@mirror-$timestamp"
+            create_snapshot "$current_snap"
+        done
+        vm_unfreeze "$vm_id" "${pvnode[$vm_id]}"
+
+        for disk in $(get_disks_from_config "$file_config"); do
+            log debug "VMID: $vm_id Disk: $disk"
+            image_spec=$(get_image_spec "$disk")
+            [[ $disk =~ $recephimg ]]
+            image_pool=${BASH_REMATCH[1]}
+            image_name=${BASH_REMATCH[2]}
+            [ -z "$image_spec" ] && continue
+            current_snap="$image_spec@mirror-$timestamp"
+            localsnapcount=$(rbd ls -l $image_pool | grep $image_name@mirror- | cut -d ' ' -f 1|wc -l)
+            if [ $localsnapcount -eq 2 ]; then
+                previouslocal=$(rbd ls -l $image_pool | grep $image_name@mirror- | cut -d ' ' -f 1|head -n 1)
+                currentlocal=$(rbd ls -l $image_pool | grep $image_name@mirror- | cut -d ' ' -f 1|tail -n 1)
+            fi
+            chkjob=$(ssh "$opt_destination" rbd ls -l $opt_pool|grep $image_name|wc -l)
+            if [ $chkjob -eq 0 ]; then
+                log debug "No Basecopy there - we need to fully xmit the latest snapshot we made and create an initial snapshot on the destination"
+                xmitjob="rbd export --rbd-concurrent-management-ops 8 $current_snap --no-progress -|pv -r|ssh $opt_destination rbd import --image-format 2 - $opt_pool/$image_name"
+                # create initial snapshot on destination
+                if ! do_run $xmitjob; then
+                    log error "Transmitting Image failed"
+                    return 1
+                fi
+                cmd="ssh $opt_destination rbd snap create $opt_pool/$image_name@mirror-$timestamp"
+                do_run $cmd
+            else
+                log debug "Basecopy on destination - let's just transfer the diff"
+                [[ $previouslocal =~ $resnapname ]]
+                previoussnap=${BASH_REMATCH[1]}
+                xmitjob="rbd export-diff --from-snap mirror-$previoussnap $image_pool/$currentlocal - | ssh $opt_destination rbd import-diff - $opt_pool/$image_name"
+                if ! do_run $xmitjob; then
+                    log error "Transmitting Image failed"
+                    return 1
+                fi
+                # remove previous snapshot on source an destination
+                cmd="rbd snap rm $image_pool/$previouslocal"
+                do_run $cmd
+                cmd="ssh $opt_destination rbd snap rm $opt_pool/$previouslocal"
+                do_run $cmd
+            fi
+        done
+        if [ ! $opt_keeplock -eq 1 ]; then
+            ssh root@${pvnode[$vm_id]} qm unlock $vm_id
+            log info "Unlocking VM $vm_id"
+        fi
+    done
+}
+
+function create_snapshot(){
+    local snap="$1"
+    log info "VM $vm_id - Creating snapshot $snap"
+    if ! do_run "rbd snap create $snap"; then    
+        return 1;
+    fi
+}
+
+function vm_freeze() {
+    local fvm=$1;
+    local fhost=$2;
+    status=$(ssh root@$fhost qm status $fvm|cut -d' ' -f 2)
+    if ! [[ "$status" == "running" ]]; then
+        log info "VM $fvm - Not running, skipping fsfreeze-freeze"
+        return
+    fi
+    local cmd="ssh root@$fhost /usr/sbin/qm guest cmd $fvm fsfreeze-freeze"
+    log info "VM $fvm - Issuing fsfreeze-freeze to $fvm on $fhost"
+    log debug "$cmd"
+    do_run "$cmd"
+    rc=$?
+    log debug "vm_freeze() return $rc"
+}
+
+function vm_unfreeze() {
+    local fvm=$1;
+    local fhost=$2;
+    status=$(ssh root@$fhost qm status $fvm|cut -d' ' -f 2)
+    if ! [[ "$status" == "running" ]]; then
+        log info "VM $fvm - Not running, skipping fsfreeze-thaw"
+        return
+    fi
+    local cmd="ssh root@$fhost /usr/sbin/qm guest cmd $fvm fsfreeze-thaw"
+    log info "VM $fvm - Issuing fsfreeze-thaw to $fvm on $fhost"
+    log debug "$cmd"
+    do_run "$cmd"
+    rc=$?
+    log debug "vm_unfreeze() return $rc"
+}
+
+function rewriteconfig(){
+    local oldconfig=$1
+    local dst=$2
+    local newpool=$3
+    local newconfig=$4
+    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+),(.*)$/\1\2: $newpool:\4-\5-disk-\6,\7/g" | ssh $dst "cat - >$newconfig"
+}
+
+function checkvmid(){
+    local dst=$1
+    local vmid=$2
+    cmd="ssh $dst ls -l $QEMU_CONF_CLUSTER/$vmid.conf|wc -l"
+    rval=$($cmd)
+    echo $rval
+}
 
 function do_run(){
     local cmd=$*;
@@ -405,6 +557,7 @@ function main(){
         version) echo "$VERSION";;
         help) usage "$@";;
         mirror) mirror "$@";; 
+        onlinemirror) onlinemirror "$@";;
         *) usage;;
     esac
 
