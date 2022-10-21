@@ -11,7 +11,7 @@ ______
 |   --|  _| . |_ -|_ -| . | | | -_|  _|
 |_____|_| |___|___|___|___|\_/|___|_|  
 
-Cross Pool (live) replication and near-live migration forProxmox VE  
+Cross Pool (live) replication and near-live migration for Proxmox VE  
 
 Usage:
     crossover <COMMAND> [ARGS] [OPTIONS]
@@ -51,13 +51,25 @@ functions that enable you to do the following:
 - Transfer a running VM to another Cluster
 - Continuously update a previously tranferred VM in another Cluster with incemental snapshots
 
-Backup And Restore Ceph for Proxmox VE with retention. This solution implements
-a snapshotbackup for Ceph cluster exporting to specific directory. The mechanism using
-Ceph snapshot, export and export differential. In backup export image and config
-file VM/CT.
-
 Currently this only works with Ceph based storage backends, since the incremental logic heavily
 relies on Rados block device features.
+
+It'll work according this scheme:
+
+```
+.:::::::::.                                                           .:::::::::. 
+|Cluster-A|                                                           |Cluster-B|
+|         |                                                           |         |
+| _______ |  rbd export-diff [..] | ssh pve04 | rbd import-diff [..]  | _______ |
+|  pve01 -|-----------------------------------------------------------|->pve04  |
+| _______ |                                                           | _______ |
+|  pve02  |                                                           |  pve05  |
+| _______ |                                                           | _______ |
+|  pve03  |                                                           |  pve06  |
+| _______ |                                                           | _______ |
+|         |                                                           |         |
+|:::::::::|                                                           |:::::::::|
+```
 
 ## Main features
 
@@ -89,6 +101,32 @@ Mirror VM to another Cluster:
 
 ```
 root@pve01:~/crossover# ./crossover mirror --vmid=100:10100 --destination=pve04 --pool=data2 --keeplocal=4 --keepremote=8 --overwrite --keep-dlock --online
+
+Start mirror 2022-10-21 18:09:36
+Transmitting Config for VM 100 to desination 10100
+update VM 100: -lock backup
+update VM 10100: -lock backup
+VM 100 - Issuing fsfreeze-freeze to 100 on pve01
+2
+VM 100 - Creating snapshot data/vm-100-disk-0@mirror-20221021180936
+Creating snap: 100% complete...done.
+VM 100 - Creating snapshot data/vm-100-disk-1@mirror-20221021180936
+Creating snap: 100% complete...done.
+VM 100 - Issuing fsfreeze-thaw to 100 on pve01
+2
+Exporting image: 100% complete...done.
+Importing image diff: 100% complete...done.
+Houskeeping localhost data vm-100-disk-0, keeping previous 4 Snapshots
+Removing snap: 100% complete...done.
+Houskeeping pve04 data2 vm-10100-disk-0, keeping previous 8 Snapshots
+Exporting image: 100% complete...done.
+Importing image diff: 100% complete...done.
+Houskeeping localhost data vm-100-disk-1, keeping previous 4 Snapshots
+Removing snap: 100% complete...done.
+Houskeeping pve04 data2 vm-10100-disk-1, keeping previous 8 Snapshots
+Unlocking source VM 100
+root@pve01:~/crossover#
+
 ```
 This example creates a mirror of VM 100 (in the source cluster) as VM 10100 (in the destination cluster) using the ceph pool "data2" for storing all attached disks. It will keep 4 Ceph snapshots prior the latest (in total 5) and 8 snapshots on the remote cluster. It will keep the VM on the target Cluster locked to avoid an accidental start (thus causing split brain issues), and will do it even if the source VM is running. 
 
