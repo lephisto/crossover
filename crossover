@@ -5,7 +5,7 @@
 # Cross Pool Migration and incremental replication Tool for Proxmox VMs using Ceph.
 # Author: Bastian Mäuser <bma@netz.org>        
 
-declare -r VERSION=0.2
+declare -r VERSION=0.3
 declare -r NAME=$(basename "$0")
 declare -r PROGNAME=${NAME%.*}
 
@@ -161,6 +161,13 @@ function exist_file(){
         [ -e "$file" ] && return 0 || return 1
         break
     done
+}
+
+function lookupcephpool() {
+    pvehost=$1
+    pvepoolname=$2
+    res=$(ssh $pvehost cat /etc/pve/storage.cfg | sed -n "/rbd: $pvepoolname/,/^$/p" | grep pool | cut -d " " -f 2)
+    echo $res
 }
 
 function get_vm_ids(){
@@ -325,11 +332,15 @@ function mirror() {
             fi
             log info "Transmitting Config for VM $vm_id to desination $dvmid"
             rewriteconfig $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf $opt_destination "$opt_pool" $PVE_NODES/"$opt_destination"/$QEMU/"$dvmid".conf "$dvmid"
+            map_vmids_to_dsthost "$opt_destination"
         fi
 
         #Lock on source + destination
         if [ $opt_lock -eq 1 ]; then
             ssh root@"${pvnode[$vm_id]}" qm set "$vm_id" --lock backup
+        fi
+
+        if [ $opt_lock -eq 1 ]; then
             ssh root@"${dstpvnode[$dvmid]}" qm set "$dvmid" --lock backup
         fi
 
@@ -348,10 +359,13 @@ function mirror() {
             dst_image_spec=$(echo $src_image_spec | sed -r -e "s/([a-zA-Z0-9]+\/[a-zA-Z0-9]+\-)([0-9]+)(\-[a-zA-Z0-9]+\-[0-9]+)/\1$dvmid\3/")
             [ -z "$dst_image_spec" ] && continue
             [[ $disk =~ $recephimg ]]
-            src_image_pool=${BASH_REMATCH[1]}
+            #src_image_pool=${BASH_REMATCH[1]}
+            src_image_pool=$(lookupcephpool "localhost" ${BASH_REMATCH[1]})
             src_image_name=${BASH_REMATCH[2]}
             [[ $dst_image_spec =~ ^[a-zA-Z0-9]+\/(.*)$ ]]
             dst_image_name=${BASH_REMATCH[1]}
+            dst_image_pool=$(lookupcephpool $opt_destination $opt_pool)
+            echo "dst_image_pool: $dst_image_pool"
             snapshot_name="@$opt_snapshot_prefix$timestamp"
             localsnapcount=$(rbd ls -l $src_image_pool | grep $src_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1|wc -l)
             if [ $localsnapcount -ge 2 ]; then
@@ -359,7 +373,7 @@ function mirror() {
                 currentlocal=$(rbd ls -l $src_image_pool | grep $src_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1|tail -n 1)
                 localts=$(rbd ls -l $src_image_pool | grep $src_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1 | sed -r -e 's/.*@mirror-(.*)/\1/')
             fi
-            latestremote=$(ssh $opt_destination rbd ls -l $opt_pool | grep $dst_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1|tail -n 1)
+            latestremote=$(ssh $opt_destination rbd ls -l $dst_image_pool | grep $dst_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1|tail -n 1)
             if [ $latestremote ]; then
                 [[ $latestremote =~ ^.*@$opt_snapshot_prefix([0-9]+)$ ]]
                 latestremotets=${BASH_REMATCH[1]}
@@ -370,24 +384,24 @@ function mirror() {
                 done
             fi
             if [ -z $basets ]; then
-                log debug "No matching Snapshot found on destination - Full Copy $src_image_pool/$src_image_name$snapshot_name to $opt_pool/$dst_image_name"
-                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress -|pv -r|ssh $opt_destination rbd import --image-format 2 - $opt_pool/$dst_image_name"
+                log debug "No matching Snapshot found on destination - Full Copy $src_image_pool/$src_image_name$snapshot_name to $dst_image_pool/$dst_image_name"
+                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress -|pv -r|ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
                 # create initial snapshot on destination
                 if ! do_run $xmitjob; then
                     log error "Transmitting Image failed"
                     return 1
                 fi
-                cmd="ssh $opt_destination rbd snap create $opt_pool/$dst_image_name$snapshot_name"
+                cmd="ssh $opt_destination rbd snap create $dst_image_pool/$dst_image_name$snapshot_name"
                 do_run $cmd
             else
                 log debug "Basecopy + snapshot on destination - let's just transfer the diff"
-                xmitjob="rbd export-diff --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | ssh $opt_destination rbd import-diff - $opt_pool/$dst_image_name"
+                xmitjob="rbd export-diff --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | ssh $opt_destination rbd import-diff - $dst_image_pool/$dst_image_name"
                 if ! do_run $xmitjob; then
                     log error "Transmitting Image failed"
                     return 1
                 fi
                 do_housekeeping "localhost" "$src_image_pool" "$src_image_name" $opt_keep_local
-                do_housekeeping "$opt_destination" "$opt_pool" "$dst_image_name" $opt_keep_remote
+                do_housekeeping "$opt_destination" "$dst_image_pool" "$dst_image_name" $opt_keep_remote
             fi
         done
         if [ ! $opt_keepslock -eq 1 ]; then

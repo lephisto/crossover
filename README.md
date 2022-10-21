@@ -43,9 +43,7 @@ Report bugs to the Github repo at https://github.com/lephisto/crossover/
 
 ## Introduction
 
-When working with hyperconverges Proxmox HA Clusters you sometimes need to get VMs migrated 
-to another cluster, or have a cold-standby copy of a VM ready to start there. Crossover implements
-functions that enable you to do the following:
+When working with hyperconverged Proxmox HA Clusters you sometimes need to get VMs migrated to another cluster, or have a cold-standby copy of a VM ready to start there in case your main Datacenter goes boom. Crossover implements functionality that enables you to do the following:
 
 - Transfer a non-running VM to another Cluster
 - Transfer a running VM to another Cluster
