@@ -2,10 +2,10 @@
 
 #set -x
 
-# Cross Pool Migration Tool for Proxmox VMs using Ceph.
+# Cross Pool Migration and incremental replication Tool for Proxmox VMs using Ceph.
 # Author: Bastian Mäuser <bma@netz.org>        
 
-declare -r VERSION=0.1
+declare -r VERSION=0.2
 declare -r NAME=$(basename "$0")
 declare -r PROGNAME=${NAME%.*}
 
@@ -18,19 +18,27 @@ declare -r EXT_CONF='.conf'
 declare -r LOG_FILE=$(mktemp)
 
 declare -A -g pvnode
+declare -A -g dstpvnode
+declare -A -g svmids
+declare -A -g dvmids
 
 declare opt_destination
 declare opt_vm_ids=''
+declare opt_snapshot_prefix='mirror-'
 declare -i opt_debug=0
 declare -i opt_dry_run=0
 declare -i opt_syslog=0
 declare -i opt_lock=1
 declare -i opt_keeplock=0
 declare -i opt_overwrite=0
+declare -i opt_online=0
+declare -i opt_keep_local=0
+declare -i opt_keep_remote=0
 
 declare -r redstconf='^\/etc\/pve\/nodes\/(.*)\/qemu-server\/([0-9]+).conf$'
 declare -r recephimg='([a-zA-Z0-9]+)\:(.*)'
-declare -r resnapname='.*@mirror-(.*)'
+declare -r resnapname=".*@$opt_snapshot_prefix(.*)"
+declare -r resplitvmid='^([0-9]+):([0-9]+)$'
 
 function usage(){
    shift
@@ -53,20 +61,22 @@ Usage:
     $PROGNAME help
     $PROGNAME version
  
-    $PROGNAME mirror     --vmid=<string> --destination=<destionationhost>
+    $PROGNAME mirror     --vmid=<string> --destination=<destionationhost> --pool=<targetpool> --keeplocal=n --keepremote=n
 Commands:
     version              Show version program
     help                 Show help program
     mirror               Replicate a stopped VM to another Cluster (full clone)
-    onlinemirror         Mirror a running VM to another Cluster (incremental)
 
 Options:
     --vmid               The ID of the VM/CT, comma separated (es. 100,101,102), 
                          'all-???' for all known guest systems in specific host (es. all-pve1, all-\$(hostname)),
                          'all' for all known guest systems in cluster,
                          'storage-???' storage Proxmox VE (pool Ceph) 
-    --destination        'Target PVE Host
-    --pool               'Target Ceph Pool
+    --destination        'Target PVE Host in target pool. e.g. --destination=pve04
+    --pool               'Ceph pool name in target pool. e.g. --pool=data
+    --keeplocal          'How many additional Snapshots to keep locally. e.g. --keeplocal=2
+    --keepremote         'How many additional Snapshots to keep remote. e.g. --keepremote=2
+    --online             'Allow online Copy
     --nolock             'Don't lock source VM on Transfer
     --keeplock           'Keep source VM locked on Transfer
     --overwrite          'Overwrite Destination
@@ -85,7 +95,7 @@ function parse_opts(){
     local args
     args=$(getopt \
            --options '' \
-           --longoptions=vmid:,destination:,pool:,nolock,keeplock,overwrite,dry-run,debug \
+           --longoptions=vmid:,destination:,pool:,keeplocal:,keepremote:,online,nolock,keeplock,overwrite,dry-run,debug \
            --name "$PROGNAME" \
            -- "$@") \
            || end_process 128
@@ -97,6 +107,9 @@ function parse_opts(){
         --vmid) opt_vm_ids=$2; shift 2;;
         --destination) opt_destination=$2; shift 2;;
         --pool) opt_pool=$2; shift 2;;
+        --keeplocal) opt_keep_local=$2; shift 2;;
+        --keepremote) opt_keep_remote=$2; shift 2;;
+        --online) opt_online=1; shift 2;;
         --dry-run) opt_dry_run=1; shift;;
         --debug) opt_debug=1; shift;;
         --nolock) opt_lock=0; shift;;
@@ -120,45 +133,7 @@ function parse_opts(){
 
     [ -z "$opt_vm_ids" ] && { log info "VM id is not set."; end_process 1; }
 
-    if [ "$opt_vm_ids" = "all" ]; then
-        #all in cluster
-
-        local data=''
-        data=$(get_vm_ids "$QEMU_CONF_CLUSTER/*$EXT_CONF")
-        vm_ids=$(echo "$data" | tr ',' '\n')
-
-    elif [[ "$opt_vm_ids" == "all-"* ]]; then
-        #all in specific host
-
-        local host=${opt_vm_ids#*-}
-        
-        if ! exist_file "$PVE_NODES/$host"; then
-            log info "Host not found!"
-            end_process 1
-        fi
-
-        local data=''
-        data=$(get_vm_ids "$PVE_NODES/$host/$QEMU/*$EXT_CONF")
-        [ -z "$data" ] && { log info "VM id is not set."; end_process 1; }
-
-        vm_ids=$(echo "$data" | tr ',' '\n')
-
-    elif [[ "$opt_vm_ids" == "storage-"* ]]; then
-        #all in specific storage (pool Ceph)
-
-        local storage=${opt_vm_ids#*-}
-
-        if ! pvesm list "$storage" > /dev/null 2>&1; then    
-            log info "Pool '$storage' not found in Proxmox VE storage." 
-            end_process 1
-        fi
-
-        vm_ids=$(pvesm list "$storage" | awk '{print $4}' | awk '!a[$0]++' )
-
-    else
-        #comma separated
-        vm_ids=$(echo "$opt_vm_ids" | tr ',' "\n")
-    fi
+    vm_ids=$(echo "$opt_vm_ids" | tr ',' "\n")
 
 }
 
@@ -168,6 +143,16 @@ function map_vmids_to_host(){
         for vm in $(ssh root@$node qm list|tail +2|tr -s ' '|cut -f 2 -d' ')
         do
             pvnode[$vm]=$node
+        done
+    done
+}
+
+function map_vmids_to_dsthost(){
+    for node in $(ssh $1 /usr/bin/pvecm nodes | tail +5 | tr -s ' ' | cut -d' ' -f 4)
+    do
+        for vm in $(ssh root@$node qm list|tail +2|tr -s ' '|cut -f 2 -d' ')
+        do
+            dstpvnode[$vm]=$node
         done
     done
 }
@@ -270,82 +255,17 @@ function log(){
     esac
 }
 
-# Do offline Mirror of a VM to another Procmox Ceph Cluster 
-function mirror() {
-    local -i rc=0;
-#    local vmname
-    parse_opts "$@"
-
-    log info "ACTION: Mirror"
-    log info "Start mirror $(date "+%F %T")"
-
-    #create pid file
-    local pid_file="/var/run/$PROGNAME.pid"
-    if [[ -e "$pid_file" ]]; then
-        local pid; pid=$(cat "${pid_file}")
-        if ps -p "$pid" > /dev/null 2>&1; then
-          log error "Process already running with pid ${pid}"
-          end_process 1
-        fi
-    fi
-
-    map_vmids_to_host
-
-    for vm_id in $vm_ids; do
-        local file_config; file_config=$(get_config_file)
-        [ -z "$file_config" ] && continue
-        local disk=''
-        
-        log debug "Checking for VM on Destination Host $opt_destination $QEMU_CONF_CLUSTER"
-        conf_on_destination=$(ssh root@$opt_destination "ls -d $QEMU_CONF_CLUSTER/$vm_id$EXT_CONF 2>/dev/null")
-        [[ "$conf_on_destination" =~ $redstconf ]]
-        host_on_destination=${BASH_REMATCH[1]}
-        echo "Host on destination: $host_on_destination"
-
-        status=$(ssh root@${pvnode[$vm_id]} qm status $vm_id|cut -d' ' -f 2)
-        if [ $status == "running" ]; then
-            log error "Source VM is running .. exiting"
-            end_process 1
-        fi
-
-        if [ -z "$host_on_destination" ]; then
-            log info "Config for $vm_id not present on remote host, transmitting"
-            rewriteconfig $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf $opt_destination "$opt_pool" $PVE_NODES/"$opt_destination"/$QEMU/"$vm_id".conf
-        fi
-
-        if [ $opt_lock -eq 1 ]; then
-            ssh root@"${pvnode[$vm_id]}" qm set "$vm_id" --lock backup
-        fi
-        
-        for disk in $(get_disks_from_config "$file_config"); do
-            log debug "VMID: $vm_id Disk: $disk"
-            image_spec=$(get_image_spec "$disk")
-            [[ $disk =~ $recephimg ]]
-            image_name=${BASH_REMATCH[2]}
-            [ -z "$image_spec" ] && continue
-            chkjob=$(ssh "$opt_destination" rbd ls -l $opt_pool|grep $image_name|wc -l)
-            if [ $chkjob -gt 0 ] && [ $opt_overwrite -eq 0 ]; then
-                log error "Image $opt_pool/$image_name exists on destination, no permission to --overwrite"
-            else
-                if [ $chkjob -gt 0 ] && [ $opt_overwrite -eq 1 ]; then
-                    deljob=$(ssh $opt_destination rbd rm $opt_pool/$image_name)
-                fi
-                xmitjob="rbd export --rbd-concurrent-management-ops 8 $image_spec -|pv -r|ssh $opt_destination rbd import --image-format 2 - $opt_pool/$image_name"
-                if ! do_run $xmitjob; then
-                    log error "Transmitting Image failed"
-                fi
-            fi
-        done
-        if [ ! $opt_keeplock -eq 1 ]; then
-            ssh root@${pvnode[$vm_id]} qm unlock $vm_id
-            log info "Unlocking VM $vm_id"
-        fi
+function map_source_to_destination_vmid(){
+    for vm_id_pair in $vm_ids; do
+        svid=$(echo "$vm_id_pair" | sed -r -e "s/^([0-9]+):([0-9]+)$/\1\n/")
+        dvid=$(echo "$vm_id_pair" | sed -r -e "s/^([0-9]+):([0-9]+)$/\2\n/")
+        svmids="$svmids"$'\n'"$svid"
+        dvmids[$svid]=$dvid
     done
 }
 
-function onlinemirror() {
+function mirror() {
     local -i rc=0;
-    local vmname
     parse_opts "$@"
 
     local timestamp; timestamp=$(date +%Y%m%d%H%M%S)
@@ -362,80 +282,129 @@ function onlinemirror() {
           end_process 1
         fi
     fi
+    if ! echo $$ > "$pid_file"; then
+        log error "Could not create PID file $pid_file"
+        end_process 1
+    fi
 
+    map_source_to_destination_vmid
     map_vmids_to_host
+    map_vmids_to_dsthost "$opt_destination"
 
-    for vm_id in $vm_ids; do
+    for vm_id in $svmids; do
         local file_config; file_config=$(get_config_file)
         [ -z "$file_config" ] && continue
         local disk=''
-        
-        log debug "Checking for VM on Destination Host $opt_destination $QEMU_CONF_CLUSTER"
-        conf_on_destination=$(ssh root@$opt_destination "ls -d $QEMU_CONF_CLUSTER/$vm_id$EXT_CONF 2>/dev/null")
+        dvmid=${dvmids[$vm_id]}
+
+        dststatus=$(ssh root@${dstpvnode[$dvmid]} qm status $dvmid|cut -d' ' -f 2)
+        if [ $dststatus == "running" ]; then
+            log error "Destination VM is running. bailing out"
+            end_process 255
+        fi
+
+        srcvmgenid=$(cat $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf|grep vmgenid|sed -r -e 's/^vmgenid:\s(.*)/\1/')
+        dstvmgenid=$(ssh $opt_destination cat $PVE_NODES/"${dstpvnode[$dvmid]}"/$QEMU/"$dvmid".conf|grep vmgenid|sed -r -e 's/^vmgenid:\s(.*)/\1/')
+        log debug "Checking for VM $dvmid on Destination Host $opt_destination $QEMU_CONF_CLUSTER"
+        log debug "DVMID: $dvmid"
+        conf_on_destination=$(ssh $opt_destination "ls -d $QEMU_CONF_CLUSTER/$dvmid$EXT_CONF 2>/dev/null")
         [[ "$conf_on_destination" =~ $redstconf ]]
         host_on_destination=${BASH_REMATCH[1]}
-        echo "Host on destination: $host_on_destination"
-
-        if [ -z "$host_on_destination" ]; then
-            log info "Config for $vm_id not present on remote host, transmitting"
-            rewriteconfig $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf $opt_destination "$opt_pool" $PVE_NODES/"$opt_destination"/$QEMU/"$vm_id".conf
+        srcstatus=$(ssh root@${pvnode[$vm_id]} qm status $vm_id|cut -d' ' -f 2)
+        if [ $srcstatus == "running" ] && [ $opt_online -eq 0 ]; then
+            log error "Source VM is running .. exiting"
+            end_process 1
         fi
+        if [ -z "$host_on_destination" ] || [ $opt_overwrite -eq 1 ]; then
+            if [ $srcvmgenid != $dstvmgenid ]; then
+                log error "Source VM genid ($srcvmgenid) doesn't match destination VM genid ($dstvmgenid). This should not happen. Bailing out"
+                end_process 255
+            fi
+            log info "Transmitting Config for VM $vm_id to desination $dvmid"
+            rewriteconfig $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf $opt_destination "$opt_pool" $PVE_NODES/"$opt_destination"/$QEMU/"$dvmid".conf "$dvmid"
+        fi
+        exit
+        #Lock on source
         if [ $opt_lock -eq 1 ]; then
             ssh root@"${pvnode[$vm_id]}" qm set "$vm_id" --lock backup
         fi
-
-        #Take Snapshot
+        #Take Rbd Snapshot
         vm_freeze "$vm_id" "${pvnode[$vm_id]}"
         for disk in $(get_disks_from_config "$file_config"); do
-            image_spec=$(get_image_spec "$disk")
-            current_snap="$image_spec@mirror-$timestamp"
-            create_snapshot "$current_snap"
+            src_image_spec=$(get_image_spec "$disk")
+            create_snapshot "$src_image_spec@$opt_snapshot_prefix$timestamp"
         done
         vm_unfreeze "$vm_id" "${pvnode[$vm_id]}"
 
         for disk in $(get_disks_from_config "$file_config"); do
-            log debug "VMID: $vm_id Disk: $disk"
-            image_spec=$(get_image_spec "$disk")
+            log debug "VMID: $vm_id Disk: $disk DESTVMID: $dvmid"
+            src_image_spec=$(get_image_spec "$disk")
+            [ -z "$src_image_spec" ] && continue
+            dst_image_spec=$(echo $src_image_spec | sed -r -e "s/([a-zA-Z0-9]+\/[a-zA-Z0-9]+\-)([0-9]+)(\-[a-zA-Z0-9]+\-[0-9]+)/\1$dvmid\3/")
+            [ -z "$dst_image_spec" ] && continue
+            echo "src_image_spec: $src_image_spec dst_image_spec: $dst_image_spec"
             [[ $disk =~ $recephimg ]]
-            image_pool=${BASH_REMATCH[1]}
-            image_name=${BASH_REMATCH[2]}
-            [ -z "$image_spec" ] && continue
-            current_snap="$image_spec@mirror-$timestamp"
-            localsnapcount=$(rbd ls -l $image_pool | grep $image_name@mirror- | cut -d ' ' -f 1|wc -l)
-            if [ $localsnapcount -eq 2 ]; then
-                previouslocal=$(rbd ls -l $image_pool | grep $image_name@mirror- | cut -d ' ' -f 1|head -n 1)
-                currentlocal=$(rbd ls -l $image_pool | grep $image_name@mirror- | cut -d ' ' -f 1|tail -n 1)
+            src_image_pool=${BASH_REMATCH[1]}
+            src_image_name=${BASH_REMATCH[2]}
+            [[ $dst_image_spec =~ ^[a-zA-Z0-9]+\/(.*)$ ]]
+            dst_image_name=${BASH_REMATCH[1]}
+            echo "dst:image_name: $dst_image_name"
+            snapshot_name="@$opt_snapshot_prefix$timestamp"
+            localsnapcount=$(rbd ls -l $src_image_pool | grep $src_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1|wc -l)
+            if [ $localsnapcount -ge 2 ]; then
+            # we have at least 2 local snapshots, to we can make an incremental copy
+                currentlocal=$(rbd ls -l $src_image_pool | grep $src_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1|tail -n 1)
+                localts=$(rbd ls -l $src_image_pool | grep $src_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1 | sed -r -e 's/.*@mirror-(.*)/\1/')
             fi
-            chkjob=$(ssh "$opt_destination" rbd ls -l $opt_pool|grep $image_name|wc -l)
-            if [ $chkjob -eq 0 ]; then
-                log debug "No Basecopy there - we need to fully xmit the latest snapshot we made and create an initial snapshot on the destination"
-                xmitjob="rbd export --rbd-concurrent-management-ops 8 $current_snap --no-progress -|pv -r|ssh $opt_destination rbd import --image-format 2 - $opt_pool/$image_name"
+            latestremote=$(ssh $opt_destination rbd ls -l $opt_pool | grep $dst_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1|tail -n 1)
+            [[ $latestremote =~ ^.*@$opt_snapshot_prefix([0-9]+)$ ]]
+            latestremotets=${BASH_REMATCH[1]}
+            for ts in $localts; do
+                if [ $ts == $latestremotets ]; then
+                    basets=$ts
+                fi
+            done
+            if [ -z $basets ]; then
+                log debug "No matching Snapshot found on destination - Full Copy $src_image_pool/$src_image_name$snapshot_name to $opt_pool/$dst_image_name"
+                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress -|pv -r|ssh $opt_destination rbd import --image-format 2 - $opt_pool/$dst_image_name"
                 # create initial snapshot on destination
                 if ! do_run $xmitjob; then
                     log error "Transmitting Image failed"
                     return 1
                 fi
-                cmd="ssh $opt_destination rbd snap create $opt_pool/$image_name@mirror-$timestamp"
+                cmd="ssh $opt_destination rbd snap create $opt_pool/$dst_image_name$snapshot_name"
                 do_run $cmd
             else
-                log debug "Basecopy on destination - let's just transfer the diff"
-                [[ $previouslocal =~ $resnapname ]]
-                previoussnap=${BASH_REMATCH[1]}
-                xmitjob="rbd export-diff --from-snap mirror-$previoussnap $image_pool/$currentlocal - | ssh $opt_destination rbd import-diff - $opt_pool/$image_name"
+                log debug "Basecopy + snapshot on destination - let's just transfer the diff"
+#                [[ $previouslocal =~ $resnapname ]]
+                xmitjob="rbd export-diff --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | ssh $opt_destination rbd import-diff - $opt_pool/$dst_image_name"
                 if ! do_run $xmitjob; then
                     log error "Transmitting Image failed"
                     return 1
                 fi
-                # remove previous snapshot on source an destination
-                cmd="rbd snap rm $image_pool/$previouslocal"
-                do_run $cmd
-                cmd="ssh $opt_destination rbd snap rm $opt_pool/$previouslocal"
-                do_run $cmd
+                do_housekeeping "localhost" "$src_image_pool" "$src_image_name" $opt_keep_local
+                do_housekeeping "$opt_destination" "$opt_pool" "$dst_image_name" $opt_keep_remote
             fi
         done
-        if [ ! $opt_keeplock -eq 1 ]; then
+        if [ ! $opt_keeplock -eq 1 ] && [ ! $opt_lock -eq 1 ]; then
             ssh root@${pvnode[$vm_id]} qm unlock $vm_id
             log info "Unlocking VM $vm_id"
+        fi
+    done
+}
+
+function do_housekeeping(){
+    horst=$1
+    rbdpool=$2
+    rbdimage=$3
+    keep=$4
+    snapshotstokill=$(ssh $horst rbd ls -l $rbdpool | grep $rbdimage@$opt_snapshot_prefix | cut -d ' ' -f 1|head -n -1 |head -n -$keep)
+    log info "Houskeeping $horst $rbdpool $rbdimage, keeping previous $keep Snapshots"
+    for snap in $snapshotstokill; do
+        cmd="ssh $horst rbd snap rm $rbdpool/$snap"
+        if ! do_run $cmd; then
+            log error "Housekeeping failed: $cmd"
+            return 1
         fi
     done
 }
@@ -485,7 +454,8 @@ function rewriteconfig(){
     local dst=$2
     local newpool=$3
     local newconfig=$4
-    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+),(.*)$/\1\2: $newpool:\4-\5-disk-\6,\7/g" | ssh $dst "cat - >$newconfig"
+    local newvmid=$5
+    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+),(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6,\7/g" | ssh $dst "cat - >$newconfig"
 }
 
 function checkvmid(){
@@ -557,7 +527,6 @@ function main(){
         version) echo "$VERSION";;
         help) usage "$@";;
         mirror) mirror "$@";; 
-        onlinemirror) onlinemirror "$@";;
         *) usage;;
     esac
 
