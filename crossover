@@ -356,14 +356,14 @@ function mirror() {
             log debug "VMID: $vm_id Disk: $disk DESTVMID: $dvmid"
             src_image_spec=$(get_image_spec "$disk")
             [ -z "$src_image_spec" ] && continue
-            dst_image_spec=$(echo $src_image_spec | sed -r -e "s/([a-zA-Z0-9]+\/[a-zA-Z0-9]+\-)([0-9]+)(\-[a-zA-Z0-9]+\-[0-9]+)/\1$dvmid\3/")
+            dst_image_spec=$(echo $src_image_spec | sed -r -e "s/(.*\/[a-zA-Z0-9]+\-)([0-9]+)(\-[a-zA-Z0-9]+\-[0-9]+)/\1$dvmid\3/")
             [ -z "$dst_image_spec" ] && continue
             [[ $disk =~ $recephimg ]]
             #src_image_pool=${BASH_REMATCH[1]}
             src_image_pool=$(lookupcephpool "localhost" ${BASH_REMATCH[1]})
             src_image_name=${BASH_REMATCH[2]}
-            [[ $dst_image_spec =~ ^[a-zA-Z0-9]+\/(.*)$ ]]
-            dst_image_name=${BASH_REMATCH[1]}
+            [[ $dst_image_spec =~ ^.*\/(.*)$ ]]
+            dst_image_name=${BASH_REMATCH[1]}-$src_image_pool
             dst_image_pool=$(lookupcephpool $opt_destination $opt_pool)
             echo "dst_image_pool: $dst_image_pool"
             snapshot_name="@$opt_snapshot_prefix$timestamp"
@@ -385,7 +385,7 @@ function mirror() {
             fi
             if [ -z $basets ]; then
                 log debug "No matching Snapshot found on destination - Full Copy $src_image_pool/$src_image_name$snapshot_name to $dst_image_pool/$dst_image_name"
-                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress -|pv -r|ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
+                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress -|pv -b -r|ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
                 # create initial snapshot on destination
                 if ! do_run $xmitjob; then
                     log error "Transmitting Image failed"
@@ -395,7 +395,7 @@ function mirror() {
                 do_run $cmd
             else
                 log debug "Basecopy + snapshot on destination - let's just transfer the diff"
-                xmitjob="rbd export-diff --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | ssh $opt_destination rbd import-diff - $dst_image_pool/$dst_image_name"
+                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | pv -b -r |ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
                 if ! do_run $xmitjob; then
                     log error "Transmitting Image failed"
                     return 1
@@ -475,7 +475,7 @@ function rewriteconfig(){
     local newpool=$3
     local newconfig=$4
     local newvmid=$5
-    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+),(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6,\7/g" | ssh $dst "cat - >$newconfig"
+    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6-\3,\7/g" | ssh $dst "cat - >$newconfig"
 }
 
 function checkvmid(){
