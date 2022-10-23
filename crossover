@@ -360,10 +360,11 @@ function mirror() {
             [ -z "$dst_image_spec" ] && continue
             [[ $disk =~ $recephimg ]]
             #src_image_pool=${BASH_REMATCH[1]}
+	    src_image_pool_pve=${BASH_REMATCH[1]}
             src_image_pool=$(lookupcephpool "localhost" ${BASH_REMATCH[1]})
             src_image_name=${BASH_REMATCH[2]}
             [[ $dst_image_spec =~ ^.*\/(.*)$ ]]
-            dst_image_name=${BASH_REMATCH[1]}-$src_image_pool
+            dst_image_name=${BASH_REMATCH[1]}-$src_image_pool_pve
             dst_image_pool=$(lookupcephpool $opt_destination $opt_pool)
             echo "dst_image_pool: $dst_image_pool"
             snapshot_name="@$opt_snapshot_prefix$timestamp"
