@@ -14,7 +14,7 @@ declare -r PVE_NODES="$PVE_DIR/nodes"
 declare -r QEMU='qemu-server'
 declare -r QEMU_CONF_CLUSTER="$PVE_NODES/*/$QEMU"
 declare -r EXT_CONF='.conf'
-declare -r PVFORMAT='elapsed:%t remaining:%e current:%r average:%a %p'
+declare -r PVFORMAT='elapsed:%t remaining:%e current:%r average:%a %b %p'
 
 declare -r LOG_FILE=$(mktemp)
 
@@ -398,8 +398,11 @@ function mirror() {
                 do_run $cmd
             else
                 log debug "Basecopy + snapshot on destination - let's just transfer the diff"
-                snapts=$(echo $currentlocal | sed -r -e 's/.*@mirror-(.*)/\1/')
-                snapshotsize=$(rbd du --pretty-format --format json $src_image_pool/$src_image_name|jq '.images[] | select (.snapshot == '\"$opt_snapshot_prefix$snapts\"') | {used_size}.used_size')
+                snapshotsize=$(rbd diff $src_image_pool/$currentlocal --from-snap $opt_snapshot_prefix$basets|awk '{ SUM += $2 } END { print SUM }')
+                if [ -n $snapshotsize ]; then
+                #disk was not attached, or really nothing has changed..
+                    snapshotsize=0
+                fi
                 log debug "snapsize $snapname: $snapshotsize "
                 xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | pv -s $snapshotsize -F \"VM $vm_id - Snap xmit: $PVFORMAT\" | ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
                 log debug "xmitjob: $xmitjob"
