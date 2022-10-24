@@ -14,6 +14,7 @@ declare -r PVE_NODES="$PVE_DIR/nodes"
 declare -r QEMU='qemu-server'
 declare -r QEMU_CONF_CLUSTER="$PVE_NODES/*/$QEMU"
 declare -r EXT_CONF='.conf'
+declare -r PVFORMAT='elapsed:%t remaining:%e current:%r average:%a %p'
 
 declare -r LOG_FILE=$(mktemp)
 
@@ -330,7 +331,7 @@ function mirror() {
                 log error "Source VM genid ($srcvmgenid) doesn't match destination VM genid ($dstvmgenid). This should not happen. Bailing out.."
                 end_process 255
             fi
-            log info "Transmitting Config for VM $vm_id to desination $dvmid"
+            log info "VM $vm_id - Transmitting Config for to destination $opt_destination VMID $dvmid"
             rewriteconfig $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf $opt_destination "$opt_pool" $PVE_NODES/"$opt_destination"/$QEMU/"$dvmid".conf "$dvmid"
             map_vmids_to_dsthost "$opt_destination"
         fi
@@ -359,14 +360,12 @@ function mirror() {
             dst_image_spec=$(echo $src_image_spec | sed -r -e "s/(.*\/[a-zA-Z0-9]+\-)([0-9]+)(\-[a-zA-Z0-9]+\-[0-9]+)/\1$dvmid\3/")
             [ -z "$dst_image_spec" ] && continue
             [[ $disk =~ $recephimg ]]
-            #src_image_pool=${BASH_REMATCH[1]}
-	    src_image_pool_pve=${BASH_REMATCH[1]}
+	        src_image_pool_pve=${BASH_REMATCH[1]}
             src_image_pool=$(lookupcephpool "localhost" ${BASH_REMATCH[1]})
             src_image_name=${BASH_REMATCH[2]}
             [[ $dst_image_spec =~ ^.*\/(.*)$ ]]
             dst_image_name=${BASH_REMATCH[1]}-$src_image_pool_pve
             dst_image_pool=$(lookupcephpool $opt_destination $opt_pool)
-            echo "dst_image_pool: $dst_image_pool"
             snapshot_name="@$opt_snapshot_prefix$timestamp"
             localsnapcount=$(rbd ls -l $src_image_pool | grep $src_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1|wc -l)
             if [ $localsnapcount -ge 2 ]; then
@@ -386,7 +385,10 @@ function mirror() {
             fi
             if [ -z $basets ]; then
                 log debug "No matching Snapshot found on destination - Full Copy $src_image_pool/$src_image_name$snapshot_name to $dst_image_pool/$dst_image_name"
-                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress -|pv -b -r|ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
+                snapts=$(echo $currentlocal | sed -r -e 's/.*@mirror-(.*)/\1/')
+                snapshotsize=$(rbd du --pretty-format --format json $src_image_pool/$src_image_name|jq '.images[] | select (.snapshot_id == null) | {provisioned_size}.provisioned_size')
+                log debug "snapsize $snapname: $snapshotsize "
+                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress - | pv -s $snapshotsize -F \"VM $vm_id - Full xmit: $PVFORMAT\" | ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
                 # create initial snapshot on destination
                 if ! do_run $xmitjob; then
                     log error "Transmitting Image failed"
@@ -396,7 +398,11 @@ function mirror() {
                 do_run $cmd
             else
                 log debug "Basecopy + snapshot on destination - let's just transfer the diff"
-                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | pv -b -r |ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
+                snapts=$(echo $currentlocal | sed -r -e 's/.*@mirror-(.*)/\1/')
+                snapshotsize=$(rbd du --pretty-format --format json $src_image_pool/$src_image_name|jq '.images[] | select (.snapshot == '\"$opt_snapshot_prefix$snapts\"') | {used_size}.used_size')
+                log debug "snapsize $snapname: $snapshotsize "
+                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | pv -s $snapshotsize -F \"VM $vm_id - Snap xmit: $PVFORMAT\" | ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
+                log debug "xmitjob: $xmitjob"
                 if ! do_run $xmitjob; then
                     log error "Transmitting Image failed"
                     return 1
@@ -404,16 +410,18 @@ function mirror() {
                 do_housekeeping "localhost" "$src_image_pool" "$src_image_name" $opt_keep_local
                 do_housekeeping "$opt_destination" "$dst_image_pool" "$dst_image_name" $opt_keep_remote
             fi
+            unset basets
         done
         if [ ! $opt_keepslock -eq 1 ]; then
             ssh root@${pvnode[$vm_id]} qm unlock $vm_id
-            log info "Unlocking source VM $vm_id"
+            log info "VM $vm_id - Unlocking source VM $vm_id"
         fi
         if [ $opt_keepdlock -eq 0 ]; then
             ssh root@${dstpvnode[$dvmid]} qm unlock $dvmid
-            log info "Unlocking destination VM $dvmid"
+            log info "VM $dvmid - Unlocking destination VM $dvmid"
         fi
     done
+    log info "Start mirror $(date "+%F %T")"
 }
 
 function do_housekeeping(){

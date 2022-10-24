@@ -25,18 +25,20 @@ Commands:
     mirror               Replicate a stopped VM to another Cluster (full clone)
 
 Options:
-    --vmid               The source+target ID of the VM/CT, comma separated (eg. --vmid=100:100,101:101), 
-    --destination        'Target PVE Host in target pool. e.g. --destination=pve04
-    --pool               'Ceph pool name in target pool. e.g. --pool=data
-    --keeplocal          'How many additional Snapshots to keep locally. e.g. --keeplocal=2
-    --keepremote         'How many additional Snapshots to keep remote. e.g. --keepremote=2
-    --online             'Allow online Copy
-    --nolock             'Don't lock source VM on Transfer (mainly for test purposes)
-    --keep-slock         'Keep source VM locked on Transfer
-    --keep-dlock         'Keep VM locked after transfer on Destination
-    --overwrite          'Overwrite Destination
-    --protect            'Protect Ceph Snapshots
-    --debug              'Show Debug Output
+    --vmid               The source+target ID of the VM, comma separated (eg. --vmid=100:100,101:101)
+                         (The possibility to specify a different Target VMID is to not interfere with VMIDs on the
+                         target cluster, or mark mirrored VMs on the destination)
+    --destination        Target PVE Host in target pool. e.g. --destination=pve04
+    --pool               Ceph pool name in target pool. e.g. --pool=data
+    --keeplocal          How many additional Snapshots to keep locally. e.g. --keeplocal=2
+    --keepremote         How many additional Snapshots to keep remote. e.g. --keepremote=2
+    --online             Allow online Copy
+    --nolock             Don't lock source VM on Transfer (mainly for test purposes)
+    --keep-slock         Keep source VM locked on Transfer
+    --keep-dlock         Keep VM locked after transfer on Destination
+    --overwrite          Overwrite Destination
+    --protect            Protect Ceph Snapshots
+    --debug              Show Debug Output
 
 Report bugs to the Github repo at https://github.com/lephisto/crossover/
 ```
@@ -75,6 +77,7 @@ It'll work according this scheme:
 * Can keep multiple backup
 * Retention policy: (eg. keep x snapshots on the source and y snapshots in the destination cluster)
 * Rewrites VM configurations so they match the new VMID and/or poolname on the destination
+* Secure an encrypted transfer (SSH), so it's safe to mirror between datacenter without an additional VPN
 
 ## Protected / unprotected snapshot
 
@@ -85,13 +88,15 @@ it's not aware of that paramter.
 
 ## Installation of prerequisites
 
-```apt install git
+```apt install git pv
 
 ## Install the Script somewhere, eg to /opt
 
 git clone https://github.com/lephisto/crossover/ /opt 
 
 ```
+
+Ensure that you can freely ssh from the Node you plan to mirror _from_ to _all_ nodes in the destination cluster, as well as localhost.
 
 ## Usage
 
