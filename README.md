@@ -88,7 +88,7 @@ it's not aware of that paramter.
 
 ## Installation of prerequisites
 
-```apt install git pv
+```apt install git pv gawk
 
 ## Install the Script somewhere, eg to /opt
 

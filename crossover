@@ -14,7 +14,8 @@ declare -r PVE_NODES="$PVE_DIR/nodes"
 declare -r QEMU='qemu-server'
 declare -r QEMU_CONF_CLUSTER="$PVE_NODES/*/$QEMU"
 declare -r EXT_CONF='.conf'
-declare -r PVFORMAT='elapsed:%t remaining:%e current:%r average:%a %b %p'
+declare -r PVFORMAT_FULL='elapsed:%t remaining:%e current:%r average:%a %b %p'
+declare -r PVFORMAT_SNAP='elapsed:%t current:%r average:%a %b'
 
 declare -r LOG_FILE=$(mktemp)
 
@@ -388,7 +389,7 @@ function mirror() {
                 snapts=$(echo $currentlocal | sed -r -e 's/.*@mirror-(.*)/\1/')
                 snapshotsize=$(rbd du --pretty-format --format json $src_image_pool/$src_image_name|jq '.images[] | select (.snapshot_id == null) | {provisioned_size}.provisioned_size')
                 log debug "snapsize $snapname: $snapshotsize "
-                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress - | pv -s $snapshotsize -F \"VM $vm_id - Full xmit: $PVFORMAT\" | ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
+                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress - | pv -s $snapshotsize -F \"VM $vm_id - Full xmit: $PVFORMAT_FULL\" | ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
                 # create initial snapshot on destination
                 if ! do_run $xmitjob; then
                     log error "Transmitting Image failed"
@@ -398,13 +399,15 @@ function mirror() {
                 do_run $cmd
             else
                 log debug "Basecopy + snapshot on destination - let's just transfer the diff"
-                snapshotsize=$(rbd diff $src_image_pool/$currentlocal --from-snap $opt_snapshot_prefix$basets|awk '{ SUM += $2 } END { print SUM }')
-                if [ -n $snapshotsize ]; then
+                log debug "sizer: rbd diff $src_image_pool/$currentlocal --from-snap $opt_snapshot_prefix$basets|gawk --bignum '{ SUM += \$2 } END { print SUM }'"
+                snapshotsize=$(rbd diff $src_image_pool/$currentlocal --from-snap $opt_snapshot_prefix$basets|gawk --bignum '{ SUM += $2 } END { print SUM }')
+                log debug "snapshotsize: $snapshotsize"
+                if [ -z "$snapshotsize" ]; then
                 #disk was not attached, or really nothing has changed..
+                    echo "ZERO!"
                     snapshotsize=0
                 fi
-                log debug "snapsize $snapname: $snapshotsize "
-                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | pv -s $snapshotsize -F \"VM $vm_id - Snap xmit: $PVFORMAT\" | ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
+                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | pv -F \"VM $vm_id - Snap xmit: $PVFORMAT_SNAP\" | ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
                 log debug "xmitjob: $xmitjob"
                 if ! do_run $xmitjob; then
                     log error "Transmitting Image failed"
@@ -424,7 +427,7 @@ function mirror() {
             log info "VM $dvmid - Unlocking destination VM $dvmid"
         fi
     done
-    log info "Start mirror $(date "+%F %T")"
+    log info "Finnished mirror $(date "+%F %T")"
 }
 
 function do_housekeeping(){
