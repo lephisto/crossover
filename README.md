@@ -28,10 +28,15 @@ Options:
     --vmid               The source+target ID of the VM, comma separated (eg. --vmid=100:100,101:101)
                          (The possibility to specify a different Target VMID is to not interfere with VMIDs on the
                          target cluster, or mark mirrored VMs on the destination)
+    --prefixid           Prefix for VMID's on target System [optional]
+    --excludevmids       Exclusde VM IDs when using --vmid==all
     --destination        Target PVE Host in target pool. e.g. --destination=pve04
     --pool               Ceph pool name in target pool. e.g. --pool=data
     --keeplocal          How many additional Snapshots to keep locally. e.g. --keeplocal=2
     --keepremote         How many additional Snapshots to keep remote. e.g. --keepremote=2
+    --rewrite            PCRE Regex to rewrite the Config Files (eg. --rewrite='s/(net0:)(.*)tag=([0-9]+)/\1\2tag=1/g' would
+                         change the VLAN tag from 5 to 1 for net0.
+Switches:    
     --online             Allow online Copy
     --nolock             Don't lock source VM on Transfer (mainly for test purposes)
     --keep-slock         Keep source VM locked on Transfer
