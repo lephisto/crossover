@@ -27,6 +27,8 @@ declare -A -g dvmids
 declare opt_destination
 declare opt_vm_ids=''
 declare opt_snapshot_prefix='mirror-'
+declare -i opt_prefix_id
+declare opt_exclude_vmids=''
 declare -i opt_debug=0
 declare -i opt_dry_run=0
 declare -i opt_syslog=0
@@ -69,17 +71,19 @@ Commands:
     mirror               Replicate a stopped VM to another Cluster (full clone)
 
 Options:
-    --vmid               The source+target ID of the VM/CT, comma separated (eg. --vmid=100:100,101:101), 
-    --destination        'Target PVE Host in target pool. e.g. --destination=pve04
-    --pool               'Ceph pool name in target pool. e.g. --pool=data
-    --keeplocal          'How many additional Snapshots to keep locally. e.g. --keeplocal=2
-    --keepremote         'How many additional Snapshots to keep remote. e.g. --keepremote=2
-    --online             'Allow online Copy
-    --nolock             'Don't lock source VM on Transfer (mainly for test purposes)
-    --keep-slock         'Keep source VM locked on Transfer
-    --keep-dlock         'Keep VM locked after transfer on Destination
-    --overwrite          'Overwrite Destination
-    --debug              'Show Debug Output
+    --vmid               The source+target ID of the VM/CT, comma separated (eg. --vmid=100:100,101:101), or all for all
+    --prefixid           Prefix for VMID's on target System [optional]
+    --excludevmids       Exclusde VM IDs when using --vmid==all
+    --destination        Target PVE Host in target pool. e.g. --destination=pve04
+    --pool               Ceph pool name in target pool. e.g. --pool=data
+    --keeplocal          How many additional Snapshots to keep locally. e.g. --keeplocal=2
+    --keepremote         How many additional Snapshots to keep remote. e.g. --keepremote=2
+    --online             Allow online Copy
+    --nolock             Don't lock source VM on Transfer (mainly for test purposes)
+    --keep-slock         Keep source VM locked on Transfer
+    --keep-dlock         Keep VM locked after transfer on Destination
+    --overwrite          Overwrite Destination
+    --debug              Show Debug Output
 
 Report bugs to <mephisto@mephis.to>
 
@@ -94,7 +98,7 @@ function parse_opts(){
     local args
     args=$(getopt \
            --options '' \
-           --longoptions=vmid:,destination:,pool:,keeplocal:,keepremote:,online,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug \
+           --longoptions=vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,online,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug \
            --name "$PROGNAME" \
            -- "$@") \
            || end_process 128
@@ -104,6 +108,8 @@ function parse_opts(){
     while true; do    
       case "$1" in
         --vmid) opt_vm_ids=$2; shift 2;;
+        --prefixid) opt_prefix_id=$2; shift 2;;
+        --excludevmids) opt_exclude_vmids=$2; shift 2;;
         --destination) opt_destination=$2; shift 2;;
         --pool) opt_pool=$2; shift 2;;
         --keeplocal) opt_keep_local=$2; shift 2;;
@@ -133,8 +139,24 @@ function parse_opts(){
 
     [ -z "$opt_vm_ids" ] && { log info "VM id is not set."; end_process 1; }
 
-    vm_ids=$(echo "$opt_vm_ids" | tr ',' "\n")
+    if [ "$opt_vm_ids" = "all" ]; then
+        local all=''
+        local data=''
+        local cnt=''
 
+        all=$(get_vm_ids "$QEMU_CONF_CLUSTER/*$EXT_CONF" "$LXC_CONF_CLUSTER/*$EXT_CONF")
+        all=$(echo "$all" | tr ',' "\n")
+        opt_exclude_vmids=$(echo "$opt_exclude_vmids" | tr ',' "\n")
+        for id in $all; do
+            cnt=$(echo $opt_exclude_vmids | grep -o $id|wc -w)
+            if [ $cnt == 0 ]; then
+                vm_ids=$(echo "$vm_ids$id:$opt_prefix_id$id,")
+            fi
+        done
+        vm_ids=$(echo "$vm_ids" | tr ',' "\n")
+    else
+        vm_ids=$(echo "$opt_vm_ids" | tr ',' "\n")
+    fi
 }
 
 function map_vmids_to_host(){
