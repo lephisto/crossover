@@ -27,6 +27,7 @@ declare -A -g dvmids
 declare opt_destination
 declare opt_vm_ids=''
 declare opt_snapshot_prefix='mirror-'
+declare opt_rewrite=''
 declare -i opt_prefix_id
 declare opt_exclude_vmids=''
 declare -i opt_debug=0
@@ -78,6 +79,9 @@ Options:
     --pool               Ceph pool name in target pool. e.g. --pool=data
     --keeplocal          How many additional Snapshots to keep locally. e.g. --keeplocal=2
     --keepremote         How many additional Snapshots to keep remote. e.g. --keepremote=2
+    --rewrite            PCRE Regex to rewrite the Config Files (eg. --rewrite='s/(net0:)(.*)tag=([0-9]+)/\1\2tag=1/g' would
+                         change the VLAN tag from 5 to 1 for net0.
+Switches:    
     --online             Allow online Copy
     --nolock             Don't lock source VM on Transfer (mainly for test purposes)
     --keep-slock         Keep source VM locked on Transfer
@@ -98,7 +102,7 @@ function parse_opts(){
     local args
     args=$(getopt \
            --options '' \
-           --longoptions=vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,online,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug \
+           --longoptions=vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,rewrite:,online,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug \
            --name "$PROGNAME" \
            -- "$@") \
            || end_process 128
@@ -114,6 +118,7 @@ function parse_opts(){
         --pool) opt_pool=$2; shift 2;;
         --keeplocal) opt_keep_local=$2; shift 2;;
         --keepremote) opt_keep_remote=$2; shift 2;;
+        --rewrite) opt_rewrite=$2; shift 2;;
         --online) opt_online=1; shift 2;;
         --dry-run) opt_dry_run=1; shift;;
         --debug) opt_debug=1; shift;;
@@ -408,12 +413,12 @@ function mirror() {
             fi
             if [ -z $basets ]; then
                 log debug "No matching Snapshot found on destination - Full Copy $src_image_pool/$src_image_name$snapshot_name to $dst_image_pool/$dst_image_name"
-                snapts=$(echo $currentlocal | sed -r -e 's/.*@mirror-(.*)/\1/')
+                #snapts=$(echo $currentlocal | sed -r -e 's/.*@mirror-(.*)/\1/')
                 snapshotsize=$(rbd du --pretty-format --format json $src_image_pool/$src_image_name|jq '.images[] | select (.snapshot_id == null) | {provisioned_size}.provisioned_size'|tail -1)
-                log debug "snapsize $snapname: $snapshotsize "
+                log debug "snapsize: $snapshotsize "
                 xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress - | pv -s $snapshotsize -F \"VM $vm_id - Full xmit: $PVFORMAT_FULL\" | ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
                 # create initial snapshot on destination
-                if ! do_run $xmitjob; then
+                if ! do_run "$xmitjob"; then
                     log error "Transmitting Image failed"
                     return 1
                 fi
@@ -425,13 +430,12 @@ function mirror() {
                 snapshotsize=$(rbd diff $src_image_pool/$currentlocal --from-snap $opt_snapshot_prefix$basets|gawk --bignum '{ SUM += $2 } END { print SUM }')
                 log debug "snapshotsize: $snapshotsize"
                 if [ -z "$snapshotsize" ]; then
-                #disk was not attached, or really nothing has changed..
-                    echo "ZERO!"
+                    #disk was not attached, or really nothing has changed..
                     snapshotsize=0
                 fi
                 xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | pv -F \"VM $vm_id - Snap xmit: $PVFORMAT_SNAP\" | ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
                 log debug "xmitjob: $xmitjob"
-                if ! do_run $xmitjob; then
+                if ! do_run "$xmitjob"; then
                     log error "Transmitting Image failed"
                     return 1
                 fi
@@ -512,7 +516,13 @@ function rewriteconfig(){
     local newpool=$3
     local newconfig=$4
     local newvmid=$5
-    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6-\3,\7/g" | ssh $dst "cat - >$newconfig"
+    local sedcmd
+    if [ ! -z $opt_rewrite ]; then
+        sedcmd='sed -r -e '$opt_rewrite
+    else
+        sedcmd='sed -e /^$/,$d'
+    fi
+    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6-\3,\7/g" | $sedcmd | sed -e '/^$/,$d' | grep -v "^parent:\s.*$" | ssh $dst "cat - >$newconfig"
 }
 
 function checkvmid(){
