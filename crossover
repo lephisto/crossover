@@ -387,7 +387,7 @@ function mirror() {
             if [ -z $basets ]; then
                 log debug "No matching Snapshot found on destination - Full Copy $src_image_pool/$src_image_name$snapshot_name to $dst_image_pool/$dst_image_name"
                 snapts=$(echo $currentlocal | sed -r -e 's/.*@mirror-(.*)/\1/')
-                snapshotsize=$(rbd du --pretty-format --format json $src_image_pool/$src_image_name|jq '.images[] | select (.snapshot_id == null) | {provisioned_size}.provisioned_size')
+                snapshotsize=$(rbd du --pretty-format --format json $src_image_pool/$src_image_name|jq '.images[] | select (.snapshot_id == null) | {provisioned_size}.provisioned_size'|tail -1)
                 log debug "snapsize $snapname: $snapshotsize "
                 xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress - | pv -s $snapshotsize -F \"VM $vm_id - Full xmit: $PVFORMAT_FULL\" | ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
                 # create initial snapshot on destination
