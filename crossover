@@ -43,6 +43,7 @@ declare -i opt_keep_remote=0
 
 declare -r redstconf='^\/etc\/pve\/nodes\/(.*)\/qemu-server\/([0-9]+).conf$'
 declare -r recephimg='([a-zA-Z0-9]+)\:(.*)'
+declare -r restripsnapshots='/^$/,$d'
 
 function usage(){
    shift
@@ -134,6 +135,7 @@ function parse_opts(){
     if [ $opt_debug -eq 1 ]; then
         log info "============================================"
         log info "Proxmox Crosspool Migration: $VERSION";
+        log info "pid: $(cat /var/run/$PROGNAME.pid)"
         log info "============================================"
         log info "Proxmox VE Version:"
 
@@ -399,19 +401,20 @@ function mirror() {
             if [ $localsnapcount -ge 2 ]; then
             # we have at least 2 local snapshots, to we can make an incremental copy
                 currentlocal=$(rbd ls -l $src_image_pool | grep $src_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1|tail -n 1)
-                localts=$(rbd ls -l $src_image_pool | grep $src_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1 | sed -r -e 's/.*@mirror-(.*)/\1/')
+                localts=$(rbd ls -l $src_image_pool | grep $src_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1 | sed -r -e 's/.*@'$opt_snapshot_prefix'(.*)/\1/')
             fi
             latestremote=$(ssh $opt_destination rbd ls -l $dst_image_pool | grep $dst_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1|tail -n 1)
-            if [ $latestremote ]; then
+            if [ "$latestremote" ]; then
                 [[ $latestremote =~ ^.*@$opt_snapshot_prefix([0-9]+)$ ]]
                 latestremotets=${BASH_REMATCH[1]}
                 for ts in $localts; do
-                    if [ $ts == $latestremotets ]; then
+                    if [ "$ts" == "$latestremotets" ]; then
                         basets=$ts
                     fi
                 done
             fi
-            if [ -z $basets ]; then
+            if [ -z "$basets" ]; then
+                xmittype='full'
                 log debug "No matching Snapshot found on destination - Full Copy $src_image_pool/$src_image_name$snapshot_name to $dst_image_pool/$dst_image_name"
                 #snapts=$(echo $currentlocal | sed -r -e 's/.*@mirror-(.*)/\1/')
                 snapshotsize=$(rbd du --pretty-format --format json $src_image_pool/$src_image_name|jq '.images[] | select (.snapshot_id == null) | {provisioned_size}.provisioned_size'|tail -1)
