@@ -1,6 +1,11 @@
 #!/bin/bash
 
-#set -x
+# Predefine if you want
+declare opt_influx_api_url=''
+declare opt_influx_token=''
+declare opt_influx_bucket=''
+declare opt_influx_api_org=''
+declare opt_influx_measurement='crossover_xmit'
 
 # Cross Pool Migration and incremental replication Tool for Proxmox VMs using Ceph.
 # Author: Bastian Mäuser <bma@netz.org>        
@@ -82,6 +87,9 @@ Options:
     --keepremote         How many additional Snapshots to keep remote. e.g. --keepremote=2
     --rewrite            PCRE Regex to rewrite the Config Files (eg. --rewrite='s/(net0:)(.*)tag=([0-9]+)/\1\2tag=1/g' would
                          change the VLAN tag from 5 to 1 for net0.
+    --influxurl          Influx API url (e.g. --influxurl=https://your-influxserver.com/api/)
+    --influxtoken        Influx API token with write permission
+    --influxbucket       Influx Bucket to write to (e.g. --influxbucket=telegraf/autogen)
 Switches:    
     --online             Allow online Copy
     --nolock             Don't lock source VM on Transfer (mainly for test purposes)
@@ -103,7 +111,7 @@ function parse_opts(){
     local args
     args=$(getopt \
            --options '' \
-           --longoptions=vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,rewrite:,online,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug \
+           --longoptions=vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,rewrite:,influxurl:,influxorg:,influxtoken:,influxbucket:,online,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug \
            --name "$PROGNAME" \
            -- "$@") \
            || end_process 128
@@ -120,6 +128,11 @@ function parse_opts(){
         --keeplocal) opt_keep_local=$2; shift 2;;
         --keepremote) opt_keep_remote=$2; shift 2;;
         --rewrite) opt_rewrite=$2; shift 2;;
+        --influxurl) opt_influx_api_url=$2; shift 2;;
+        --influxorg) opt_influx_api_org=$2; shift 2;;
+        --influxtoken) opt_influx_token=$2; shift 2;;
+        --influxbucket) opt_influx_bucket=$2; shift 2;;
+
         --online) opt_online=1; shift 2;;
         --dry-run) opt_dry_run=1; shift;;
         --debug) opt_debug=1; shift;;
@@ -305,6 +318,10 @@ function mirror() {
     parse_opts "$@"
 
     local timestamp; timestamp=$(date +%Y%m%d%H%M%S)
+    local xmittype
+    local xmitrc
+    local freezerc
+    local unfreezerc
 
     log info "ACTION: Onlinemirror"
     log info "Start mirror $(date "+%F %T")"
@@ -333,11 +350,10 @@ function mirror() {
         local disk=''
         dvmid=${dvmids[$vm_id]}
 
-
-        srcvmgenid=$(cat $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf|grep vmgenid|sed -r -e 's/^vmgenid:\s(.*)/\1/')
-        dstvmgenid=$(ssh $opt_destination cat $PVE_NODES/"${dstpvnode[$dvmid]}"/$QEMU/"$dvmid".conf 2>/dev/null|grep vmgenid|sed -r -e 's/^vmgenid:\s(.*)/\1/')
-        log debug "Checking for VM $dvmid on Destination Host $opt_destination $QEMU_CONF_CLUSTER"
-        log debug "DVMID: $dvmid"
+        srcvmgenid=$(cat $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf | sed -e ''$restripsnapshots'' | grep vmgenid | sed -r -e 's/^vmgenid:\s(.*)/\1/')
+        dstvmgenid=$(ssh $opt_destination cat $PVE_NODES/"${dstpvnode[$dvmid]}"/$QEMU/"$dvmid".conf 2>/dev/null | grep vmgenid | sed -e ''$restripsnapshots'' | sed -r -e 's/^vmgenid:\s(.*)/\1/')
+        log info "VM $vm_id - Checking for VM $dvmid on Destination Host $opt_destination $QEMU_CONF_CLUSTER"
+        log debug "DVMID:$dvmid srcvmgenid:$srcvmgenid dstvmgenid:$dstvmgenid"
         conf_on_destination=$(ssh $opt_destination "ls -d $QEMU_CONF_CLUSTER/$dvmid$EXT_CONF 2>/dev/null")
         [[ "$conf_on_destination" =~ $redstconf ]]
         host_on_destination=${BASH_REMATCH[1]}
@@ -375,13 +391,14 @@ function mirror() {
             ssh root@"${dstpvnode[$dvmid]}" qm set "$dvmid" --lock backup
         fi
 
-        #Freeze, take Rbd Snapshot then unfreeze
-        vm_freeze "$vm_id" "${pvnode[$vm_id]}"
+        vm_freeze "$vm_id" "${pvnode[$vm_id]}" >/dev/null
+        freezerc=$?
         for disk in $(get_disks_from_config "$file_config"); do
             src_image_spec=$(get_image_spec "$disk")
             create_snapshot "$src_image_spec@$opt_snapshot_prefix$timestamp"
         done
-        vm_unfreeze "$vm_id" "${pvnode[$vm_id]}"
+        vm_unfreeze "$vm_id" "${pvnode[$vm_id]}" >/dev/null
+        unfreezerc=$?
 
         for disk in $(get_disks_from_config "$file_config"); do
             log debug "VMID: $vm_id Disk: $disk DESTVMID: $dvmid"
@@ -419,15 +436,19 @@ function mirror() {
                 #snapts=$(echo $currentlocal | sed -r -e 's/.*@mirror-(.*)/\1/')
                 snapshotsize=$(rbd du --pretty-format --format json $src_image_pool/$src_image_name|jq '.images[] | select (.snapshot_id == null) | {provisioned_size}.provisioned_size'|tail -1)
                 log debug "snapsize: $snapshotsize "
-                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress - | pv -s $snapshotsize -F \"VM $vm_id - Full xmit: $PVFORMAT_FULL\" | ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
+                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -s $snapshotsize -F \"VM $vm_id - Full xmit: $PVFORMAT_FULL\" | ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
                 # create initial snapshot on destination
-                if ! do_run "$xmitjob"; then
+                log debug "xmitjob: $xmitjob"
+                do_run "$xmitjob"
+                xmitrc=$?
+                if [ ! $xmitrc ]; then
                     log error "Transmitting Image failed"
                     return 1
                 fi
                 cmd="ssh $opt_destination rbd snap create $dst_image_pool/$dst_image_name$snapshot_name"
                 do_run $cmd
             else
+                xmittype='incremental'
                 log debug "Basecopy + snapshot on destination - let's just transfer the diff"
                 log debug "sizer: rbd diff $src_image_pool/$currentlocal --from-snap $opt_snapshot_prefix$basets|gawk --bignum '{ SUM += \$2 } END { print SUM }'"
                 snapshotsize=$(rbd diff $src_image_pool/$currentlocal --from-snap $opt_snapshot_prefix$basets|gawk --bignum '{ SUM += $2 } END { print SUM }')
@@ -436,14 +457,26 @@ function mirror() {
                     #disk was not attached, or really nothing has changed..
                     snapshotsize=0
                 fi
-                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | pv -F \"VM $vm_id - Snap xmit: $PVFORMAT_SNAP\" | ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
+                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -F \"VM $vm_id - Snap xmit: $PVFORMAT_SNAP\" | ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
                 log debug "xmitjob: $xmitjob"
-                if ! do_run "$xmitjob"; then
+                do_run "$xmitjob"
+                xmitrc=$?
+                if [ ! $xmitrc ]; then
                     log error "Transmitting Image failed"
                     return 1
                 fi
                 do_housekeeping "localhost" "$src_image_pool" "$src_image_name" $opt_keep_local
                 do_housekeeping "$opt_destination" "$dst_image_pool" "$dst_image_name" $opt_keep_remote
+            fi
+            xmitted=$(cat /tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size)
+            rm /tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size
+            if [ $opt_influx_api_url != "" ]; then
+                log info "VM $vm_id - Logging to InfluxDB: $opt_influx_api_url"
+                influxlp="$opt_influx_measurement,destination=$opt_destination,srcimage=$src_image_name,dstimage=$dst_image_name,xmittype=$xmittype bytescalculated=$snapshotsize""i,bytesonwire=$xmitted""i,xmitrc=$xmitrc""i,freezerc=$freezerc""i,unfreezerc=$unfreezerc""i,basets=$basets""i"
+                log debug "InfluxLP: --->\n $influxlp"
+                cmd="curl --request POST \"$opt_influx_api_url/v2/write?org=$opt_influx_api_org&bucket=$opt_influx_bucket&precision=ns\" --header \"Authorization: Token $opt_influx_token\" --header \"Content-Type: text/plain; charset=utf-8\" --header \"Accept: application/json\" --data-binary '$influxlp'"
+                echo "cmd:$cmd"
+                do_run "$cmd"
             fi
             unset basets
         done
@@ -496,6 +529,7 @@ function vm_freeze() {
     do_run "$cmd"
     rc=$?
     log debug "vm_freeze() return $rc"
+    return $rc
 }
 
 function vm_unfreeze() {
@@ -511,6 +545,7 @@ function vm_unfreeze() {
     do_run "$cmd"
     rc=$?
     log debug "vm_unfreeze() return $rc"
+    return $rc
 }
 
 function rewriteconfig(){
