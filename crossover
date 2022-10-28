@@ -399,6 +399,13 @@ function mirror() {
         done
         vm_unfreeze "$vm_id" "${pvnode[$vm_id]}" >/dev/null
         unfreezerc=$?
+        if [ $unfreezerc -gt 0 ]; then
+            log error "VM $vm_id - QEMU-Guest could not fsfreeze on guest."
+        fi
+        if [ ! $opt_keepslock -eq 1 ]; then
+            ssh root@${pvnode[$vm_id]} qm unlock $vm_id
+            log info "VM $vm_id - Unlocking source VM $vm_id"
+        fi
 
         for disk in $(get_disks_from_config "$file_config"); do
             log debug "VMID: $vm_id Disk: $disk DESTVMID: $dvmid"
@@ -468,9 +475,9 @@ function mirror() {
                 do_housekeeping "localhost" "$src_image_pool" "$src_image_name" $opt_keep_local
                 do_housekeeping "$opt_destination" "$dst_image_pool" "$dst_image_name" $opt_keep_remote
             fi
-            xmitted=$(cat /tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size)
-            rm /tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size
-            if [ $opt_influx_api_url != "" ]; then
+            xmitted=$(cat /tmp/"$PROGNAME"."$pid"."$dst_image_pool"-"$dst_image_name".size)
+            rm /tmp/"$PROGNAME"."$pid"."$dst_image_pool"-"$dst_image_name".size
+            if [ -n "$opt_influx_api_url" ]; then
                 log info "VM $vm_id - Logging to InfluxDB: $opt_influx_api_url"
                 influxlp="$opt_influx_measurement,destination=$opt_destination,srcimage=$src_image_name,dstimage=$dst_image_name,xmittype=$xmittype bytescalculated=$snapshotsize""i,bytesonwire=$xmitted""i,xmitrc=$xmitrc""i,freezerc=$freezerc""i,unfreezerc=$unfreezerc""i,basets=$basets""i"
                 log debug "InfluxLP: --->\n $influxlp"
@@ -480,10 +487,6 @@ function mirror() {
             fi
             unset basets
         done
-        if [ ! $opt_keepslock -eq 1 ]; then
-            ssh root@${pvnode[$vm_id]} qm unlock $vm_id
-            log info "VM $vm_id - Unlocking source VM $vm_id"
-        fi
         if [ $opt_keepdlock -eq 0 ]; then
             ssh root@${dstpvnode[$dvmid]} qm unlock $dvmid
             log info "VM $dvmid - Unlocking destination VM $dvmid"
