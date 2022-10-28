@@ -19,8 +19,8 @@ declare -r PVE_NODES="$PVE_DIR/nodes"
 declare -r QEMU='qemu-server'
 declare -r QEMU_CONF_CLUSTER="$PVE_NODES/*/$QEMU"
 declare -r EXT_CONF='.conf'
-declare -r PVFORMAT_FULL='elapsed:%t remaining:%e current:%r average:%a %b %p'
-declare -r PVFORMAT_SNAP='elapsed:%t current:%r average:%a %b'
+declare -r PVFORMAT_FULL='e:%t r:%e c:%r a:%a %b %p'
+declare -r PVFORMAT_SNAP='e:%t c:%r a:%a %b'
 
 declare -r LOG_FILE=$(mktemp)
 
@@ -191,6 +191,35 @@ function parse_opts(){
         vm_ids=$(echo "$vm_ids" | tr ',' "\n")
     else
         vm_ids=$(echo "$opt_vm_ids" | tr ',' "\n")
+    fi
+}
+
+human_readable() {
+    local abbrevs=(
+        $((1 << 60)):ZiB
+        $((1 << 50)):EiB
+        $((1 << 40)):TiB
+        $((1 << 30)):GiB
+        $((1 << 20)):MiB
+        $((1 << 10)):KiB
+        $((1)):bytes
+    )
+
+    local bytes="${1}"
+    local precision="${2}"
+
+    if [[ "${bytes}" == "1" ]]; then
+        echo "1 byte"
+    else
+        for item in "${abbrevs[@]}"; do
+            local factor="${item%:*}"
+            local abbrev="${item#*:}"
+            if [[ "${bytes}" -ge "${factor}" ]]; then
+                local size="$(bc -l <<< "${bytes} / ${factor}")"
+                printf "%.*f %s\n" "${precision}" "${size}" "${abbrev}"
+                break
+            fi
+        done
     fi
 }
 
@@ -472,7 +501,7 @@ function mirror() {
                 #snapts=$(echo $currentlocal | sed -r -e 's/.*@mirror-(.*)/\1/')
                 snapshotsize=$(rbd du --pretty-format --format json $src_image_pool/$src_image_name|jq '.images[] | select (.snapshot_id == null) | {provisioned_size}.provisioned_size'|tail -1)
                 log debug "snapsize: $snapshotsize "
-                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -s $snapshotsize -F \"VM $vm_id - Full xmit: $PVFORMAT_FULL\" | ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name"
+                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -s $snapshotsize -F \"VM $vm_id - F $src_image_pool/$src_image_name$snapshot_name: $PVFORMAT_FULL\" | ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name  2>/dev/null"
                 # create initial snapshot on destination
                 log debug "xmitjob: $xmitjob"
                 startdisk=$(date +%s)
@@ -484,7 +513,8 @@ function mirror() {
                     return 1
                 fi
                 cmd="ssh $opt_destination rbd snap create $dst_image_pool/$dst_image_name$snapshot_name"
-                do_run $cmd
+                do_run $cmd 2>/dev/null
+                log info "VM $vm_id - created snapshot on $dvmid [rc:$?]"
             else
                 xmittype='incremental'
                 log debug "Basecopy + snapshot on destination - let's just transfer the diff"
@@ -495,7 +525,7 @@ function mirror() {
                     #disk was not attached, or really nothing has changed..
                     snapshotsize=0
                 fi
-                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -F \"VM $vm_id - Snap xmit: $PVFORMAT_SNAP\" | ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
+                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -F \"VM $vm_id - I $src_image_pool/$src_image_name$snapshot_name: $PVFORMAT_SNAP\" | ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
                 log debug "xmitjob: $xmitjob"
                 startdisk=$(date +%s)
                 do_run "$xmitjob"
@@ -511,7 +541,7 @@ function mirror() {
             xmitted=$(cat /tmp/"$PROGNAME"."$pid"."$dst_image_pool"-"$dst_image_name".size)
             totalbytes=$(( totalbytes + xmitted ))
             rm /tmp/"$PROGNAME"."$pid"."$dst_image_pool"-"$dst_image_name".size
-            log info "VM $vm_id - Disk Summary: Took $(( enddisk - startdisk )) Seconds to transfer $xmitted Bytes in a $xmittype run"
+            log info "VM $vm_id - Disk Summary: Took $(( enddisk - startdisk )) Seconds to transfer $(human_readable $xmitted 2) in a $xmittype run"
             if [ -n "$opt_influx_api_url" ]; then
                 log info "VM $vm_id - Logging to InfluxDB: $opt_influx_api_url"
                 influxlp="$opt_influx_measurement,destination=$opt_destination,srcimage=$src_image_name,dstimage=$dst_image_name,xmittype=$xmittype bytescalculated=$snapshotsize""i,bytesonwire=$xmitted""i,xmitrc=$xmitrc""i,freezerc=$freezerc""i,unfreezerc=$unfreezerc""i,basets=$basets""i"
@@ -529,7 +559,7 @@ function mirror() {
     done
     endjob=$(date +%s)
     log info "Finnished mirror $(date "+%F %T")"
-    log info "Job Summary: Took $(( endjob - startjob )) Seconds to transfer $totalbytes Bytes for $diskcount Disks on $vmcount VMs"
+    log info "Job Summary: Took $(( endjob - startjob )) Seconds to transfer $(human_readable $totalbytes 2) for $diskcount Disks on $vmcount VMs"
 }
 
 function do_housekeeping(){
