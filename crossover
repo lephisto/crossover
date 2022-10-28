@@ -10,7 +10,7 @@ declare opt_influx_measurement='crossover_xmit'
 # Cross Pool Migration and incremental replication Tool for Proxmox VMs using Ceph.
 # Author: Bastian Mäuser <bma@netz.org>        
 
-declare -r VERSION=0.3
+declare -r VERSION=0.4
 declare -r NAME=$(basename "$0")
 declare -r PROGNAME=${NAME%.*}
 
