@@ -18,7 +18,7 @@ Usage:
     crossover help
     crossover version
  
-    crossover mirror     --vmid=<string> --destination=<destionationhost> --pool=<targetpool> --keeplocal=n --keepremote=n
+    crossover mirror     --vmid=<string> --destination=<destionationhost> --pool=<targetpool> --keeplocal=[n][d|s] --keepremote=[n][d|s]
 Commands:
     version              Show version program
     help                 Show help program
@@ -32,10 +32,13 @@ Options:
     --excludevmids       Exclusde VM IDs when using --vmid==all
     --destination        Target PVE Host in target pool. e.g. --destination=pve04
     --pool               Ceph pool name in target pool. e.g. --pool=data
-    --keeplocal          How many additional Snapshots to keep locally. e.g. --keeplocal=2
-    --keepremote         How many additional Snapshots to keep remote. e.g. --keepremote=2
+    --keeplocal          How many additional Snapshots to keep locally, specified in seconds or day. e.g. --keeplocal=2d
+    --keepremote         How many additional Snapshots to keep remote, specified in seconds or day. e.g. --keepremote=7d
     --rewrite            PCRE Regex to rewrite the Config Files (eg. --rewrite='s/(net0:)(.*)tag=([0-9]+)/\1\2tag=1/g' would
                          change the VLAN tag from 5 to 1 for net0.
+    --influxurl          Influx API url (e.g. --influxurl=https://your-influxserver.com/api/)
+    --influxtoken        Influx API token with write permission
+    --influxbucket       Influx Bucket to write to (e.g. --influxbucket=telegraf/autogen)
 Switches:    
     --online             Allow online Copy
     --nolock             Don't lock source VM on Transfer (mainly for test purposes)

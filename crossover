@@ -49,7 +49,6 @@ declare opt_keep_remote='0s'
 declare -r redstconf='^\/etc\/pve\/nodes\/(.*)\/qemu-server\/([0-9]+).conf$'
 declare -r recephimg='([a-zA-Z0-9]+)\:(.*)'
 declare -r restripsnapshots='/^$/,$d'
-declare -r retimestamp='^.*@mirror-([0-9]+)$'
 declare -r redateex='^([0-9]{4})([0-9]{2})([0-9]{2})([0-9]{2})([0-9]{2})([0-9]{2})$'
 
 function usage(){
@@ -85,8 +84,8 @@ Options:
     --excludevmids       Exclusde VM IDs when using --vmid==all
     --destination        Target PVE Host in target pool. e.g. --destination=pve04
     --pool               Ceph pool name in target pool. e.g. --pool=data
-    --keeplocal          How many additional Snapshots to keep locally. e.g. --keeplocal=2
-    --keepremote         How many additional Snapshots to keep remote. e.g. --keepremote=2
+    --keeplocal          How many additional Snapshots to keep locally. e.g. --keeplocal=2d
+    --keepremote         How many additional Snapshots to keep remote. e.g. --keepremote=7d
     --rewrite            PCRE Regex to rewrite the Config Files (eg. --rewrite='s/(net0:)(.*)tag=([0-9]+)/\1\2tag=1/g' would
                          change the VLAN tag from 5 to 1 for net0.
     --influxurl          Influx API url (e.g. --influxurl=https://your-influxserver.com/api/)
@@ -539,6 +538,7 @@ function do_housekeeping(){
     local rbdimage=$3
     local keep=$4
     local vm=$5
+    local snap
     local -i keeptime
     local -i ts
     local -i snapepoch
@@ -546,7 +546,7 @@ function do_housekeeping(){
 
     log info "VM $vm - Housekeeping: $horst $rbdpool/$rbdimage, keeping Snapshots for $keep"
     cmd="ssh $horst rbd ls -l $rbdpool | grep $rbdimage@$opt_snapshot_prefix | cut -d ' ' -f 1|head -n -1"
-    snapshots=$(do_run "$cmd")
+    snapshots=$($cmd)
     if [ "${keep:(-1)}" == "d" ]; then
         keep=${keep%?}
         keeptime=$(( $keep * 86400 ))
@@ -555,16 +555,15 @@ function do_housekeeping(){
         keeptime=$keep
     fi
     for snap in $snapshots; do
-        [[ $snap =~ $retimestamp ]]
+        [[ $snap =~ ^.*@$opt_snapshot_prefix([0-9]+)$ ]]
         ts=${BASH_REMATCH[1]}
         [[ $ts =~ $redateex ]]
         snapepoch=$(date --date "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[3]} ${BASH_REMATCH[4]}:${BASH_REMATCH[5]}:${BASH_REMATCH[6]}" +%s)
-        age=$(($(date +"%s")-$snapepoch ))
+        age=$(($(date -u +"%s")-$snapepoch ))
         if [ $age -gt $keeptime ]; then
             cmd="ssh $horst rbd snap rm $rbdpool/$snap"
             do_run "$cmd" 2>/dev/null
             log info "VM $vm_id - Removing Snapshot $horst $rbdpool/$snap ($age""s) [rc:$?]"
-            return $rc
         fi
     done
 }
