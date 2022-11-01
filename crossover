@@ -5,12 +5,13 @@ declare opt_influx_api_url=''
 declare opt_influx_token=''
 declare opt_influx_bucket=''
 declare opt_influx_api_org=''
-declare opt_influx_measurement='crossover_xmit'
+declare opt_influx_job_metrics='crossover_xmit'
+declare opt_influx_summary_metrics='crossover_jobs'
 
 # Cross Pool Migration and incremental replication Tool for Proxmox VMs using Ceph.
 # Author: Bastian Mäuser <bma@netz.org>        
 
-declare -r VERSION=0.4
+declare -r VERSION=0.5
 declare -r NAME=$(basename "$0")
 declare -r PROGNAME=${NAME%.*}
 
@@ -29,6 +30,23 @@ declare -A -g dstpvnode
 declare -A -g svmids
 declare -A -g dvmids
 
+declare -g -i perf_freeze_ok=0
+declare -g -i perf_freeze_failed=0
+declare -g -i perf_ss_ok=0
+declare -g -i perf_ss_failed=0
+declare -g -i perf_ss_ok=0
+declare -g -i perf_ss_failed=0
+declare -g -i perf_full_ok=0
+declare -g -i perf_full_failed=0
+declare -g -i perf_diff_ok=0
+declare -g -i perf_diff_failed=0
+declare -g -i perf_bytes_full=0
+declare -g -i perf_bytes_diff=0
+declare -g -i perf_bytes_total=0
+declare -g -i perf_vm_running=0
+declare -g -i perf_vm_stopped=0
+declare -g -i perf_snaps_removed=0
+
 declare opt_destination
 declare opt_vm_ids=''
 declare opt_snapshot_prefix='mirror-'
@@ -45,6 +63,7 @@ declare -i opt_overwrite=0
 declare -i opt_online=0
 declare opt_keep_local='0s'
 declare opt_keep_remote='0s'
+
 
 declare -r redstconf='^\/etc\/pve\/nodes\/(.*)\/qemu-server\/([0-9]+).conf$'
 declare -r recephimg='([a-zA-Z0-9]+)\:(.*)'
@@ -149,7 +168,7 @@ function parse_opts(){
     if [ $opt_debug -eq 1 ]; then
         log info "============================================"
         log info "Proxmox Crosspool Migration: $VERSION";
-        log info "pid: $(cat /var/run/$PROGNAME.pid)"
+        log info "pid: $(cat /var/run/"$PROGNAME".pid)"
         log info "============================================"
         log info "Proxmox VE Version:"
 
@@ -208,7 +227,9 @@ human_readable() {
     local bytes="${1}"
     local precision="${2}"
 
-    if [[ "${bytes}" == "1" ]]; then
+    if [[ "${bytes}" == "0" ]]; then
+        echo "0 byte"
+    elif [[ "${bytes}" == "1" ]]; then
         echo "1 byte"
     else
         for item in "${abbrevs[@]}"; do
@@ -363,16 +384,16 @@ function mirror() {
 
     local timestamp; timestamp=$(date +%Y%m%d%H%M%S)
     local xmittype
+    local humantime
+    local vmname
     local -i xmitrc
+    local -i ssrc
     local -i freezerc
     local -i unfreezerc
     local -i startdisk
     local -i enddisk
     local -i startjob
     local -i endjob
-    local -i fullbytes
-    local -i incrementalbytes
-    local -i totalbytes
     local -i vmcount=0
     local -i diskcount=0
 
@@ -404,7 +425,8 @@ function mirror() {
         [ -z "$file_config" ] && continue
         local disk=''
         dvmid=${dvmids[$vm_id]}
-
+        vmname=$(cat $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf | sed -e ''$restripsnapshots'' | grep "name\:" | cut -d' ' -f 2)
+        log info "VM $vm_id - Starting mirror for $vmname"
         srcvmgenid=$(cat $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf | sed -e ''$restripsnapshots'' | grep vmgenid | sed -r -e 's/^vmgenid:\s(.*)/\1/')
         dstvmgenid=$(ssh $opt_destination cat $PVE_NODES/"${dstpvnode[$dvmid]}"/$QEMU/"$dvmid".conf 2>/dev/null | grep vmgenid | sed -e ''$restripsnapshots'' | sed -r -e 's/^vmgenid:\s(.*)/\1/')
         log info "VM $vm_id - Checking for VM $dvmid on Destination Host $opt_destination $QEMU_CONF_CLUSTER"
@@ -449,10 +471,20 @@ function mirror() {
         freezerc=$?
         if [ $freezerc -gt 0 ]; then
             log error "VM $vm_id - QEMU-Guest could not fsfreeze on guest."
+            (( perf_freeze_failed++ ))
+        else
+            (( perf_freeze_ok++ ))
         fi
         for disk in $(get_disks_from_config "$file_config"); do
             src_image_spec=$(get_image_spec "$disk")
             create_snapshot "$src_image_spec@$opt_snapshot_prefix$timestamp" 2>/dev/null
+            ssrc=$?
+            if [ $ssrc -gt 0 ]; then
+                log error "VM $vm_id - rbd snap failed."
+                (( perf_ss_failed++ ))
+            else
+                (( perf_ss_ok++ ))
+            fi
         done
         vm_unfreeze "$vm_id" "${pvnode[$vm_id]}" >/dev/null
         unfreezerc=$?
@@ -510,11 +542,15 @@ function mirror() {
                 xmitrc=$?
                 if [ ! $xmitrc ]; then
                     log error "Transmitting Image failed"
+                    (( perf_full_failed++ ))
                     return 1
+                else
+                    (( perf_full_ok++ ))
                 fi
                 cmd="ssh $opt_destination rbd snap create $dst_image_pool/$dst_image_name$snapshot_name"
-                do_run $cmd 2>/dev/null
+                do_run "$cmd" 2>/dev/null
                 log info "VM $vm_id - created snapshot on $dvmid [rc:$?]"
+                perf_bytes_full=$(( perf_bytes_full + $(cat /tmp/"$PROGNAME"."$pid"."$dst_image_pool"-"$dst_image_name".size) ))
             else
                 xmittype='incremental'
                 log debug "Basecopy + snapshot on destination - let's just transfer the diff"
@@ -533,21 +569,23 @@ function mirror() {
                 xmitrc=$?
                 if [ ! $xmitrc ]; then
                     log error "Transmitting Image failed"
+                    (( perf_diff_failed++ ))
                     return 1
+                else
+                    (( perf_diff_ok++ ))
                 fi
                 do_housekeeping "localhost" "$src_image_pool" "$src_image_name" "$opt_keep_local" "$vm_id"
                 do_housekeeping "$opt_destination" "$dst_image_pool" "$dst_image_name" "$opt_keep_remote" "$vm_id"
+                perf_bytes_diff=$(( perf_bytes_diff + $(cat /tmp/"$PROGNAME"."$pid"."$dst_image_pool"-"$dst_image_name".size) ))
             fi
-            xmitted=$(cat /tmp/"$PROGNAME"."$pid"."$dst_image_pool"-"$dst_image_name".size)
-            totalbytes=$(( totalbytes + xmitted ))
+            perf_bytes_total=$(( perf_bytes_total + $(cat /tmp/"$PROGNAME"."$pid"."$dst_image_pool"-"$dst_image_name".size) ))
             rm /tmp/"$PROGNAME"."$pid"."$dst_image_pool"-"$dst_image_name".size
-            log info "VM $vm_id - Disk Summary: Took $(( enddisk - startdisk )) Seconds to transfer $(human_readable $xmitted 2) in a $xmittype run"
+            log info "VM $vm_id - Disk Summary: Took $(( enddisk - startdisk )) Seconds to transfer $(human_readable "$perf_bytes_total" 2) in a $xmittype run"
             if [ -n "$opt_influx_api_url" ]; then
                 log info "VM $vm_id - Logging to InfluxDB: $opt_influx_api_url"
-                influxlp="$opt_influx_measurement,destination=$opt_destination,srcimage=$src_image_name,dstimage=$dst_image_name,xmittype=$xmittype bytescalculated=$snapshotsize""i,bytesonwire=$xmitted""i,xmitrc=$xmitrc""i,freezerc=$freezerc""i,unfreezerc=$unfreezerc""i,basets=$basets""i"
+                influxlp="$opt_influx_job_metrics,vmname=$vmname,destination=$opt_destination,srcimage=$src_image_name,dstimage=$dst_image_name,xmittype=$xmittype bytescalculated=$snapshotsize""i,bytesonwire=$perf_bytes_total""i,xmitrc=$xmitrc""i,freezerc=$freezerc""i,unfreezerc=$unfreezerc""i,basets=$basets""i"
                 log debug "InfluxLP: --->\n $influxlp"
                 cmd="curl --request POST \"$opt_influx_api_url/v2/write?org=$opt_influx_api_org&bucket=$opt_influx_bucket&precision=ns\" --header \"Authorization: Token $opt_influx_token\" --header \"Content-Type: text/plain; charset=utf-8\" --header \"Accept: application/json\" --data-binary '$influxlp'"
-                echo "cmd:$cmd"
                 do_run "$cmd"
             fi
             unset basets
@@ -559,7 +597,19 @@ function mirror() {
     done
     endjob=$(date +%s)
     log info "Finnished mirror $(date "+%F %T")"
-    log info "Job Summary: Took $(( endjob - startjob )) Seconds to transfer $(human_readable $totalbytes 2) for $diskcount Disks on $vmcount VMs"
+    humantime=$(date -ud "@$endjob" +'$((%s/3600/24)) days %H hours %M minutes %S seconds')
+    log info "Job Summary: Bytes transferd $(human_readable $totalbytes 2) for $diskcount Disks on $vmcount VMs in $humantime"
+    log info "VM Freeze OK/failed...: $perf_freeze_ok/$perf_freeze_failed"
+    log info "RBD Snapshot OK/failed: $perf_ss_ok/$perf_ss_failed"
+    log info "Full xmitted..........: $(human_readable $perf_bytes_full 2)"
+    log info "Differential Bytes ...: $(human_readable $perf_bytes_diff 2)"
+    if [ -n "$opt_influx_api_url" ]; then
+        log info "VM $vm_id - Logging Job summary to InfluxDB: $opt_influx_api_url"
+        influxlp="$opt_influx_summary_metrics perf_bytes_diff=$perf_bytes_diff""i,perf_bytes_full=$perf_bytes_full""i,perf_bytes_total=$perf_bytes_total""i,perf_diff_failed=$perf_diff_failed""i,perf_diff_ok=$perf_diff_ok""i,perf_freeze_failed=$perf_freeze_failed""i,perf_freeze_ok=$perf_freeze_ok""i,perf_full_failed=$perf_full_failed""i,perf_full_ok=$perf_full_ok""i,perf_ss_failed=$perf_ss_failed""i,perf_ss_ok=$perf_ss_ok""i,perf_vm_running=$perf_vm_running""i,perf_vm_stopped=$perf_vm_stopped""i"
+        log debug "InfluxLP: --->\n $influxlp"
+        cmd="curl --request POST \"$opt_influx_api_url/v2/write?org=$opt_influx_api_org&bucket=$opt_influx_bucket&precision=ns\" --header \"Authorization: Token $opt_influx_token\" --header \"Content-Type: text/plain; charset=utf-8\" --header \"Accept: application/json\" --data-binary '$influxlp'"
+        do_run "$cmd"
+    fi
 }
 
 function do_housekeeping(){
@@ -590,10 +640,13 @@ function do_housekeeping(){
         [[ $ts =~ $redateex ]]
         snapepoch=$(date --date "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[3]} ${BASH_REMATCH[4]}:${BASH_REMATCH[5]}:${BASH_REMATCH[6]}" +%s)
         age=$(($(date -u +"%s")-$snapepoch ))
-        if [ $age -gt $keeptime ]; then
+        if [ $age -gt "$keeptime" ]; then
             cmd="ssh $horst rbd snap rm $rbdpool/$snap"
             do_run "$cmd" 2>/dev/null
             log info "VM $vm_id - Removing Snapshot $horst $rbdpool/$snap ($age""s) [rc:$?]"
+            if [ $rc -eq 0 ]; then
+                (( perf_snaps_removed++ ))
+            fi
         fi
     done
 }
@@ -610,10 +663,13 @@ function create_snapshot(){
 function vm_freeze() {
     local fvm=$1;
     local fhost=$2;
-    status=$(ssh root@$fhost qm status $fvm|cut -d' ' -f 2)
+    status=$(ssh root@"$fhost" qm status "$fvm"|cut -d' ' -f 2)
     if ! [[ "$status" == "running" ]]; then
         log info "VM $fvm - Not running, skipping fsfreeze-freeze"
         return
+        (( perf_vm_stopped++ ))
+    else 
+        (( perf_vm_running++ ))
     fi
     local cmd="ssh root@$fhost /usr/sbin/qm guest cmd $fvm fsfreeze-freeze"
     log info "VM $fvm - Issuing fsfreeze-freeze to $fvm on $fhost"
@@ -626,7 +682,7 @@ function vm_freeze() {
 function vm_unfreeze() {
     local fvm=$1;
     local fhost=$2;
-    status=$(ssh root@$fhost qm status $fvm|cut -d' ' -f 2)
+    status=$(ssh root@"$fhost" qm status "$fvm"|cut -d' ' -f 2)
     if ! [[ "$status" == "running" ]]; then
         log info "VM $fvm - Not running, skipping fsfreeze-thaw"
         return
@@ -646,12 +702,12 @@ function rewriteconfig(){
     local newconfig=$4
     local newvmid=$5
     local sedcmd
-    if [ ! -z $opt_rewrite ]; then
+    if [ ! -z "$opt_rewrite" ]; then
         sedcmd='sed -r -e '$opt_rewrite
     else
         sedcmd='sed -e /^$/,$d'
     fi
-    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6-\3,\7/g" | $sedcmd | sed -e '/^$/,$d' | grep -v "^parent:\s.*$" | ssh $dst "cat - >$newconfig"
+    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6-\3,\7/g" | $sedcmd | sed -e '/^$/,$d' | grep -v "^parent:\s.*$" | ssh "$dst" "cat - >$newconfig"
 }
 
 function checkvmid(){
@@ -659,7 +715,7 @@ function checkvmid(){
     local vmid=$2
     cmd="ssh $dst ls -l $QEMU_CONF_CLUSTER/$vmid.conf|wc -l"
     rval=$($cmd)
-    echo $rval
+    echo "$rval"
 }
 
 function do_run(){
