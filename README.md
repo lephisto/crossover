@@ -87,13 +87,6 @@ It'll work according this scheme:
 * Rewrites VM configurations so they match the new VMID and/or poolname on the destination
 * Secure an encrypted transfer (SSH), so it's safe to mirror between datacenter without an additional VPN
 
-## Protected / unprotected snapshot
-
-!TBD!
-You can protect Ceph Snapshots by the according Ceph/RDB flag, to avoid accidental deletion
-and thus damaging your chain. Keep in mind that Proxmox won't let you delete VM's then, because
-it's not aware of that paramter.
-
 ## Installation of prerequisites
 
 ```apt install git pv gawk jq
@@ -106,37 +99,41 @@ git clone https://github.com/lephisto/crossover/ /opt
 
 Ensure that you can freely ssh from the Node you plan to mirror _from_ to _all_ nodes in the destination cluster, as well as localhost.
 
-## Usage
+## Examples
 
 Mirror VM to another Cluster:
 
 ```
-root@pve01:~/crossover# ./crossover mirror --vmid=100:10100 --destination=pve04 --pool=data2 --keeplocal=4 --keepremote=8 --overwrite --keep-dlock --online
-
-Start mirror 2022-10-21 18:09:36
-Transmitting Config for VM 100 to desination 10100
-update VM 100: -lock backup
-update VM 10100: -lock backup
-VM 100 - Issuing fsfreeze-freeze to 100 on pve01
-2
-VM 100 - Creating snapshot data/vm-100-disk-0@mirror-20221021180936
-Creating snap: 100% complete...done.
-VM 100 - Creating snapshot data/vm-100-disk-1@mirror-20221021180936
-Creating snap: 100% complete...done.
-VM 100 - Issuing fsfreeze-thaw to 100 on pve01
-2
-Exporting image: 100% complete...done.
-Importing image diff: 100% complete...done.
-Houskeeping localhost data vm-100-disk-0, keeping previous 4 Snapshots
-Removing snap: 100% complete...done.
-Houskeeping pve04 data2 vm-10100-disk-0, keeping previous 8 Snapshots
-Exporting image: 100% complete...done.
-Importing image diff: 100% complete...done.
-Houskeeping localhost data vm-100-disk-1, keeping previous 4 Snapshots
-Removing snap: 100% complete...done.
-Houskeeping pve04 data2 vm-10100-disk-1, keeping previous 8 Snapshots
-Unlocking source VM 100
-root@pve01:~/crossover#
+root@pve01:~/crossover# ./crossover mirror --vmid=all --prefixid=99 --excludevmids=101 --destination=pve04 --pool=data2 --overwrite --online 
+ACTION: Onlinemirror
+Start mirror 2022-11-01 19:21:44
+VM 100 - Starting mirror for testubuntu
+VM 100 - Checking for VM 99100 on Destination Host pve04 /etc/pve/nodes/*/qemu-server
+VM 100 - Transmitting Config for to destination pve04 VMID 99100
+VM 100 - locked 100 [rc:0]
+VM 99100 - locked 99100 [rc:0]
+VM 100 - Creating snapshot data/vm-100-disk-0@mirror-20221101192144
+VM 100 - Creating snapshot data/vm-100-disk-1@mirror-20221101192144
+VM 100 - unlocked source VM 100 [rc:0]
+VM 100 - I data/vm-100-disk-0@mirror-20221101192144: e:0:00:01 c:[ 227KiB/s] a:[ 227KiB/s]  372KiB
+VM 100 - Housekeeping: localhost data/vm-100-disk-0, keeping Snapshots for 0s
+VM 100 - Removing Snapshot localhost data/vm-100-disk-0@mirror-20221101192032 (106s) [rc:0]
+VM 100 - Housekeeping: pve04 data2/vm-99100-disk-0-data, keeping Snapshots for 0s
+VM 100 - Removing Snapshot pve04 data2/vm-99100-disk-0-data@mirror-20221101192032 (108s) [rc:0]
+VM 100 - Disk Summary: Took 2 Seconds to transfer 372.89 KiB in a incremental run
+VM 100 - I data/vm-100-disk-1@mirror-20221101192144: e:0:00:00 c:[ 346 B/s] a:[ 346 B/s] 74.0 B
+VM 100 - Housekeeping: localhost data/vm-100-disk-1, keeping Snapshots for 0s
+VM 100 - Removing Snapshot localhost data/vm-100-disk-1@mirror-20221101192032 (114s) [rc:0]
+VM 100 - Housekeeping: pve04 data2/vm-99100-disk-1-data, keeping Snapshots for 0s
+VM 100 - Removing Snapshot pve04 data2/vm-99100-disk-1-data@mirror-20221101192032 (115s) [rc:0]
+VM 100 - Disk Summary: Took 1 Seconds to transfer 372.96 KiB in a incremental run
+VM 99100 - Unlocking destination VM 99100
+Finnished mirror 2022-11-01 19:22:30
+Job Summary: Bytes transferd 2 bytes for 2 Disks on 1 VMs in 00 hours 00 minutes 46 seconds
+VM Freeze OK/failed...: 1/0
+RBD Snapshot OK/failed: 2/0
+Full xmitted..........: 0 byte
+Differential Bytes ...: 372.96 KiB
 
 ```
 This example creates a mirror of VM 100 (in the source cluster) as VM 10100 (in the destination cluster) using the ceph pool "data2" for storing all attached disks. It will keep 4 Ceph snapshots prior the latest (in total 5) and 8 snapshots on the remote cluster. It will keep the VM on the target Cluster locked to avoid an accidental start (thus causing split brain issues), and will do it even if the source VM is running. 

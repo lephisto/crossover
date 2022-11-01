@@ -78,7 +78,7 @@ function usage(){
  _____                                 
 |     |___ ___ ___ ___ ___ _ _ ___ ___ 
 |   --|  _| . |_ -|_ -| . | | | -_|  _|
-|_____|_| |___|___|___|___|\_/|___|_|  
+|_____|_| |___|___|___|___|\_/|___|_|   v$VERSION
 
 EOF
     fi
@@ -394,6 +394,7 @@ function mirror() {
     local -i enddisk
     local -i startjob
     local -i endjob
+    local -i duration
     local -i vmcount=0
     local -i diskcount=0
 
@@ -414,6 +415,8 @@ function mirror() {
         log error "Could not create PID file $pid_file"
         end_process 1
     fi
+
+    
 
     map_source_to_destination_vmid
     map_vmids_to_host
@@ -597,7 +600,9 @@ function mirror() {
     done
     endjob=$(date +%s)
     log info "Finnished mirror $(date "+%F %T")"
-    humantime=$(date -ud "@$endjob" +'$((%s/3600/24)) days %H hours %M minutes %S seconds')
+    #duration=$((endjob-startjob))
+    #echo "duration:$duration"
+    humantime=$(date -ud "@$((endjob-startjob))" +'%H hours %M minutes %S seconds')
     log info "Job Summary: Bytes transferd $(human_readable $totalbytes 2) for $diskcount Disks on $vmcount VMs in $humantime"
     log info "VM Freeze OK/failed...: $perf_freeze_ok/$perf_freeze_failed"
     log info "RBD Snapshot OK/failed: $perf_ss_ok/$perf_ss_failed"
