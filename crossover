@@ -1,5 +1,7 @@
 #!/bin/bash
 
+LC_ALL="en_US.UTF-8"
+
 # Predefine if you want
 declare opt_influx_api_url=''
 declare opt_influx_token=''
@@ -214,34 +216,13 @@ function parse_opts(){
 }
 
 human_readable() {
-    local abbrevs=(
-        $((1 << 60)):ZiB
-        $((1 << 50)):EiB
-        $((1 << 40)):TiB
-        $((1 << 30)):GiB
-        $((1 << 20)):MiB
-        $((1 << 10)):KiB
-        $((1)):bytes
-    )
-
-    local bytes="${1}"
-    local precision="${2}"
-
-    if [[ "${bytes}" == "0" ]]; then
-        echo "0 byte"
-    elif [[ "${bytes}" == "1" ]]; then
-        echo "1 byte"
-    else
-        for item in "${abbrevs[@]}"; do
-            local factor="${item%:*}"
-            local abbrev="${item#*:}"
-            if [[ "${bytes}" -ge "${factor}" ]]; then
-                local size="$(bc -l <<< "${bytes} / ${factor}")"
-                printf "%.*f %s\n" "${precision}" "${size}" "${abbrev}"
-                break
-            fi
-        done
-    fi
+    b=${1:-0}; d=''; s=0; S=(Bytes {K,M,G,T,P,E,Z,Y}iB)
+    while ((b > 1024)); do
+        d="$(printf ".%02d" $((b % 1024 * 100 / 1024)))"
+        b=$((b / 1024))
+        let s++
+    done
+    echo "$b$d ${S[$s]}"
 }
 
 function map_vmids_to_host(){
@@ -603,11 +584,11 @@ function mirror() {
     #duration=$((endjob-startjob))
     #echo "duration:$duration"
     humantime=$(date -ud "@$((endjob-startjob))" +'%H hours %M minutes %S seconds')
-    log info "Job Summary: Bytes transferd $(human_readable $totalbytes 2) for $diskcount Disks on $vmcount VMs in $humantime"
+    log info "Job Summary: Bytes transferd $(human_readable $totalbytes) for $diskcount Disks on $vmcount VMs in $humantime"
     log info "VM Freeze OK/failed...: $perf_freeze_ok/$perf_freeze_failed"
     log info "RBD Snapshot OK/failed: $perf_ss_ok/$perf_ss_failed"
-    log info "Full xmitted..........: $(human_readable $perf_bytes_full 2)"
-    log info "Differential Bytes ...: $(human_readable $perf_bytes_diff 2)"
+    log info "Full xmitted..........: $(human_readable $perf_bytes_full)"
+    log info "Differential Bytes ...: $(human_readable $perf_bytes_diff)"
     if [ -n "$opt_influx_api_url" ]; then
         log info "VM $vm_id - Logging Job summary to InfluxDB: $opt_influx_api_url"
         influxlp="$opt_influx_summary_metrics perf_bytes_diff=$perf_bytes_diff""i,perf_bytes_full=$perf_bytes_full""i,perf_bytes_total=$perf_bytes_total""i,perf_diff_failed=$perf_diff_failed""i,perf_diff_ok=$perf_diff_ok""i,perf_freeze_failed=$perf_freeze_failed""i,perf_freeze_ok=$perf_freeze_ok""i,perf_full_failed=$perf_full_failed""i,perf_full_ok=$perf_full_ok""i,perf_ss_failed=$perf_ss_failed""i,perf_ss_ok=$perf_ss_ok""i,perf_vm_running=$perf_vm_running""i,perf_vm_stopped=$perf_vm_stopped""i"
