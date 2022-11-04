@@ -584,7 +584,7 @@ function mirror() {
     #duration=$((endjob-startjob))
     #echo "duration:$duration"
     humantime=$(date -ud "@$((endjob-startjob))" +'%H hours %M minutes %S seconds')
-    log info "Job Summary: Bytes transferd $(human_readable $totalbytes) for $diskcount Disks on $vmcount VMs in $humantime"
+    log info "Job Summary: Bytes transferred $(human_readable $perf_bytes_total) for $diskcount Disks on $vmcount VMs in $humantime"
     log info "VM Freeze OK/failed...: $perf_freeze_ok/$perf_freeze_failed"
     log info "RBD Snapshot OK/failed: $perf_ss_ok/$perf_ss_failed"
     log info "Full xmitted..........: $(human_readable $perf_bytes_full)"
