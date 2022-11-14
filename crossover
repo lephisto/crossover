@@ -2,6 +2,8 @@
 
 LC_ALL="en_US.UTF-8"
 
+source rainbow.sh
+
 # Predefine if you want
 declare opt_influx_api_url=''
 declare opt_influx_token=''
@@ -174,7 +176,7 @@ function parse_opts(){
         log info "============================================"
         log info "Proxmox VE Version:"
 
-        pveversion
+        echowhite $(pveversion)
 
         log info "============================================"
     fi
@@ -375,11 +377,15 @@ function mirror() {
     local -i enddisk
     local -i startjob
     local -i endjob
-    local -i duration
     local -i vmcount=0
     local -i diskcount=0
 
-    log info "ACTION: Onlinemirror"
+    local disp_perf_freeze_failed
+    local disp_perf_ss_failed
+    local disp_perf_full_failed
+    local disp_perf_diff_failed
+
+    log info "ACTION: $(echowhite Onlinemirror)"
     log info "Start mirror $(date "+%F %T")"
     startjob=$(date +%s)
 
@@ -410,7 +416,7 @@ function mirror() {
         local disk=''
         dvmid=${dvmids[$vm_id]}
         vmname=$(cat $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf | sed -e ''$restripsnapshots'' | grep "name\:" | cut -d' ' -f 2)
-        log info "VM $vm_id - Starting mirror for $vmname"
+        log info "VM $vm_id - Starting mirror for $(echowhite "$vmname")"
         srcvmgenid=$(cat $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf | sed -e ''$restripsnapshots'' | grep vmgenid | sed -r -e 's/^vmgenid:\s(.*)/\1/')
         dstvmgenid=$(ssh $opt_destination cat $PVE_NODES/"${dstpvnode[$dvmid]}"/$QEMU/"$dvmid".conf 2>/dev/null | grep vmgenid | sed -e ''$restripsnapshots'' | sed -r -e 's/^vmgenid:\s(.*)/\1/')
         log info "VM $vm_id - Checking for VM $dvmid on Destination Host $opt_destination $QEMU_CONF_CLUSTER"
@@ -581,14 +587,18 @@ function mirror() {
     done
     endjob=$(date +%s)
     log info "Finnished mirror $(date "+%F %T")"
-    #duration=$((endjob-startjob))
-    #echo "duration:$duration"
     humantime=$(date -ud "@$((endjob-startjob))" +'%H hours %M minutes %S seconds')
     log info "Job Summary: Bytes transferred $(human_readable $perf_bytes_total) for $diskcount Disks on $vmcount VMs in $humantime"
-    log info "VM Freeze OK/failed...: $perf_freeze_ok/$perf_freeze_failed"
-    log info "RBD Snapshot OK/failed: $perf_ss_ok/$perf_ss_failed"
-    log info "Full xmitted..........: $(human_readable $perf_bytes_full)"
-    log info "Differential Bytes ...: $(human_readable $perf_bytes_diff)"
+    if [ "$perf_freeze_failed" -gt 0 ]; then disp_perf_freeze_failed="$(echored $perf_freeze_failed)"; else disp_perf_freeze_failed="$(echogreen $perf_freeze_failed)"; fi
+    if [ "$perf_ss_failed" -gt 0 ]; then disp_perf_ss_failed="$(echored $perf_ss_failed)"; else disp_perf_ss_failed="$(echogreen $perf_ss_failed)"; fi
+    if [ "$perf_full_failed" -gt 0 ]; then disp_perf_full_failed="$(echored $perf_full_failed)"; else disp_perf_full_failed="$(echogreen $perf_full_failed)"; fi
+    if [ "$perf_diff_failed" -gt 0 ]; then disp_perf_diff_failed="$(echored $perf_diff_failed)"; else disp_perf_diff_failed="$(echogreen $perf_diff_failed)"; fi
+    log info "VM Freeze OK/failed.......: $perf_freeze_ok/$disp_perf_freeze_failed"    
+    log info "RBD Snapshot OK/failed....: $perf_ss_ok/$disp_perf_ss_failed"
+    log info "RBD export-full OK/failed.: $perf_full_ok/$disp_perf_full_failed"
+    log info "RBD export-diff OK/failed.: $perf_diff_ok/$disp_perf_diff_failed"
+    log info "Full xmitted..............: $(human_readable $perf_bytes_full)"
+    log info "Differential Bytes .......: $(human_readable $perf_bytes_diff)"
     if [ -n "$opt_influx_api_url" ]; then
         log info "VM $vm_id - Logging Job summary to InfluxDB: $opt_influx_api_url"
         influxlp="$opt_influx_summary_metrics perf_bytes_diff=$perf_bytes_diff""i,perf_bytes_full=$perf_bytes_full""i,perf_bytes_total=$perf_bytes_total""i,perf_diff_failed=$perf_diff_failed""i,perf_diff_ok=$perf_diff_ok""i,perf_freeze_failed=$perf_freeze_failed""i,perf_freeze_ok=$perf_freeze_ok""i,perf_full_failed=$perf_full_failed""i,perf_full_ok=$perf_full_ok""i,perf_ss_failed=$perf_ss_failed""i,perf_ss_ok=$perf_ss_ok""i,perf_vm_running=$perf_vm_running""i,perf_vm_stopped=$perf_vm_stopped""i"
