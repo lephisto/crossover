@@ -9,6 +9,7 @@ declare opt_influx_api_url=''
 declare opt_influx_token=''
 declare opt_influx_bucket=''
 declare opt_influx_api_org=''
+declare opt_influx_jobname=''
 declare opt_influx_job_metrics='crossover_xmit'
 declare opt_influx_summary_metrics='crossover_jobs'
 
@@ -114,6 +115,7 @@ Options:
     --influxurl          Influx API url (e.g. --influxurl=https://your-influxserver.com/api/)
     --influxtoken        Influx API token with write permission
     --influxbucket       Influx Bucket to write to (e.g. --influxbucket=telegraf/autogen)
+    --jobname            Descriptive name for the job, used in Statistics
 Switches:    
     --online             Allow online Copy
     --nolock             Don't lock source VM on Transfer (mainly for test purposes)
@@ -135,7 +137,7 @@ function parse_opts(){
     local args
     args=$(getopt \
            --options '' \
-           --longoptions=vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,rewrite:,influxurl:,influxorg:,influxtoken:,influxbucket:,online,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug \
+           --longoptions=vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,rewrite:,influxurl:,influxorg:,influxtoken:,influxbucket:,jobname:,online,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug \
            --name "$PROGNAME" \
            -- "$@") \
            || end_process 128
@@ -156,6 +158,7 @@ function parse_opts(){
         --influxorg) opt_influx_api_org=$2; shift 2;;
         --influxtoken) opt_influx_token=$2; shift 2;;
         --influxbucket) opt_influx_bucket=$2; shift 2;;
+        --jobname) opt_influx_jobname=$2; shift 2;;
 
         --online) opt_online=1; shift 2;;
         --dry-run) opt_dry_run=1; shift;;
@@ -182,6 +185,8 @@ function parse_opts(){
     fi
 
     [ -z "$opt_vm_ids" ] && { log info "VM id is not set."; end_process 1; }
+
+    [ -z "$opt_influx_jobname" ] && { log info "Jobname is not set."; end_process 1; }
 
     if [ -n "$opt_keep_local" ]; then
         if ! [[ ${opt_keep_local:(-1)} == "s" || ${opt_keep_local:(-1)} == "d" ]]; then
@@ -575,7 +580,7 @@ function mirror() {
             log info "VM $vm_id - Disk Summary: Took $(( enddisk - startdisk )) Seconds to transfer $(human_readable "$perf_bytes_total" 2) in a $xmittype run"
             if [ -n "$opt_influx_api_url" ]; then
                 log info "VM $vm_id - Logging to InfluxDB: $opt_influx_api_url"
-                influxlp="$opt_influx_job_metrics,vmname=$vmname,destination=$opt_destination,srcimage=$src_image_name,dstimage=$dst_image_name,xmittype=$xmittype bytescalculated=$snapshotsize""i,bytesonwire=$perf_bytes_total""i,xmitrc=$xmitrc""i,freezerc=$freezerc""i,unfreezerc=$unfreezerc""i,basets=$basets""i"
+                influxlp="$opt_influx_job_metrics,vmname=$vmname,jobname=$opt_influx_jobname,destination=$opt_destination,srcimage=$src_image_name,dstimage=$dst_image_name,xmittype=$xmittype bytescalculated=$snapshotsize""i,bytesonwire=$perf_bytes_total""i,xmitrc=$xmitrc""i,freezerc=$freezerc""i,unfreezerc=$unfreezerc""i,basets=$basets""i"
                 log debug "InfluxLP: --->\n $influxlp"
                 cmd="curl --request POST \"$opt_influx_api_url/v2/write?org=$opt_influx_api_org&bucket=$opt_influx_bucket&precision=ns\" --header \"Authorization: Token $opt_influx_token\" --header \"Content-Type: text/plain; charset=utf-8\" --header \"Accept: application/json\" --data-binary '$influxlp'"
                 do_run "$cmd"
@@ -603,7 +608,7 @@ function mirror() {
     log info "Differential Bytes .......: $(human_readable $perf_bytes_diff)"
     if [ -n "$opt_influx_api_url" ]; then
         log info "VM $vm_id - Logging Job summary to InfluxDB: $opt_influx_api_url"
-        influxlp="$opt_influx_summary_metrics perf_bytes_diff=$perf_bytes_diff""i,perf_bytes_full=$perf_bytes_full""i,perf_bytes_total=$perf_bytes_total""i,perf_diff_failed=$perf_diff_failed""i,perf_diff_ok=$perf_diff_ok""i,perf_freeze_failed=$perf_freeze_failed""i,perf_freeze_ok=$perf_freeze_ok""i,perf_full_failed=$perf_full_failed""i,perf_full_ok=$perf_full_ok""i,perf_ss_failed=$perf_ss_failed""i,perf_ss_ok=$perf_ss_ok""i,perf_vm_running=$perf_vm_running""i,perf_vm_stopped=$perf_vm_stopped""i"
+        influxlp="$opt_influx_summary_metrics,jobname=$opt_influx_jobname perf_bytes_diff=$perf_bytes_diff""i,perf_bytes_full=$perf_bytes_full""i,perf_bytes_total=$perf_bytes_total""i,perf_diff_failed=$perf_diff_failed""i,perf_diff_ok=$perf_diff_ok""i,perf_freeze_failed=$perf_freeze_failed""i,perf_freeze_ok=$perf_freeze_ok""i,perf_full_failed=$perf_full_failed""i,perf_full_ok=$perf_full_ok""i,perf_ss_failed=$perf_ss_failed""i,perf_ss_ok=$perf_ss_ok""i,perf_vm_running=$perf_vm_running""i,perf_vm_stopped=$perf_vm_stopped""i"
         log debug "InfluxLP: --->\n $influxlp"
         cmd="curl --request POST \"$opt_influx_api_url/v2/write?org=$opt_influx_api_org&bucket=$opt_influx_bucket&precision=ns\" --header \"Authorization: Token $opt_influx_token\" --header \"Content-Type: text/plain; charset=utf-8\" --header \"Accept: application/json\" --data-binary '$influxlp'"
         do_run "$cmd"
