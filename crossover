@@ -16,7 +16,7 @@ declare opt_influx_summary_metrics='crossover_jobs'
 # Cross Pool Migration and incremental replication Tool for Proxmox VMs using Ceph.
 # Author: Bastian Mäuser <bma@netz.org>        
 
-declare -r VERSION=0.5
+declare -r VERSION=0.6
 declare -r NAME=$(basename "$0")
 declare -r PROGNAME=${NAME%.*}
 
@@ -206,6 +206,7 @@ function parse_opts(){
         local all=''
         local data=''
         local cnt=''
+        local ids=''
 
         all=$(get_vm_ids "$QEMU_CONF_CLUSTER/*$EXT_CONF" "$LXC_CONF_CLUSTER/*$EXT_CONF")
         all=$(echo "$all" | tr ',' "\n")
@@ -218,8 +219,17 @@ function parse_opts(){
         done
         vm_ids=$(echo "$vm_ids" | tr ',' "\n")
     else
-        vm_ids=$(echo "$opt_vm_ids" | tr ',' "\n")
+        if [ ! -z $opt_prefix_id ]; then
+            ids=$(echo "$opt_vm_ids" | tr ',' "\n")
+            for id in $ids; do
+                vm_ids=$(echo "$vm_ids$id:$opt_prefix_id$id,")
+            done
+            vm_ids=$(echo "$vm_ids" | tr ',' "\n")
+        else
+            vm_ids=$(echo "$opt_vm_ids" | tr ',' "\n")
+        fi
     fi
+    log debug "vm_ids: $vm_ids"
 }
 
 human_readable() {
