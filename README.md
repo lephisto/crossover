@@ -142,6 +142,10 @@ The use case is that you might want to keep a cold-standby copy of a certain VM 
 
 Another usecase could be that you want to migrate a VM from one cluster to another with the least downtime possible. Real live migration that you are used to inside one cluster is hard to achive cross-cluster, but you can easily make an initial migration while the VM is still running on the source cluster (fully transferring the block devices), shut it down on source, run the mirror process again (which is much faster now because it only needs to transfer the diff since the initial snapshot) and start it up on the target cluster. This way the migration basically takes one boot plus a few seconds for transferring the incremental snapshot.
 
+## Near-live Migration 
+
+To minimize downtime and achive a near-live Migration from one Cluster to another it's recommended to do an initial Sync of a VM from the source to the destination cluster. After that, run the job again, and add the --migrate switch. This causes the source VM to be shut down prior snapshot + transfer, and be restarted on the destination cluster as soon as the incremental transfer is complete. Using --migrate will always try to start the VM on the destination cluster.
+
 ## Things to check
 
 From Proxmox VE Hosts you want to backup you need to be able to ssh passwordless to all other Cluster hosts, that may hold VM's or Containers. This goes for the source and for the destination Cluster.
