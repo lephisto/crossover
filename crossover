@@ -742,7 +742,9 @@ function rewriteconfig(){
     else
         sedcmd='sed -e /^$/,$d'
     fi
-    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6-\3,\7/g" | $sedcmd | sed -e '/^$/,$d' | grep -v "^parent:\s.*$" | ssh "$dst" "cat - >$newconfig"
+    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6-\3,\7/g" | $sedcmd | sed -e '/^$/,$d' | sed -e '/ide[0-9]:.*-cloudinit,media=cdrom,.*/d' | grep -v "^parent:\s.*$" | ssh "$dst" "cat - >$newconfig"
+#    echo "$newconfig"
+#    end_process 255
 }
 
 function checkvmid(){
