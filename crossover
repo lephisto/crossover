@@ -473,18 +473,22 @@ function mirror() {
             map_vmids_to_dsthost "$opt_destination"
         fi
 
-        #--move so we need to shutdown?
+        #--move so we need to shutdown and remove from ha group?
         if [ $opt_migrate -eq 1 ]; then
-            log info "VM $vm_id - Shutting down VM on ${pvnode[$vm_id]}"
-            do_run "ssh root@"${pvnode[$vm_id]}" qm shutdown "$vm_id >/dev/null
+            log info "VM $vm_id - Migration requested, shutting down VM on ${pvnode[$vm_id]}"
+            if [ "$(get_ha_status "$vm_id")" == "started" ]; then
+                log info "VM $vm_id - remove from HA"
+                do_run "ha-manager remove $vm_id"
+            fi
+            do_run "ssh root@${pvnode[$vm_id]} qm shutdown $vm_id >/dev/null"
         fi
 
         #Lock on source + destination
         if [ $opt_lock -eq 1 ]; then
             do_run "ssh root@"${pvnode[$vm_id]}" qm set "$vm_id" --lock backup" >/dev/null
-            log info "VM $vm_id - locked $vm_id [rc:$?]"
+            log info "VM $vm_id - locked $vm_id [rc:$?] on source"
             do_run "ssh root@"${dstpvnode[$dvmid]}" qm set "$dvmid" --lock backup" >/dev/null
-            log info "VM $dvmid - locked $dvmid [rc:$?]"
+            log info "VM $dvmid - locked $dvmid [rc:$?] on destination"
         fi
         #Freeze fs only if no migration running
         if [ $opt_migrate -eq 0 ]; then
@@ -743,8 +747,6 @@ function rewriteconfig(){
         sedcmd='sed -e /^$/,$d'
     fi
     cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6-\3,\7/g" | $sedcmd | sed -e '/^$/,$d' | sed -e '/ide[0-9]:.*-cloudinit,media=cdrom,.*/d' | grep -v "^parent:\s.*$" | ssh "$dst" "cat - >$newconfig"
-#    echo "$newconfig"
-#    end_process 255
 }
 
 function checkvmid(){
@@ -806,6 +808,12 @@ function get_image_spec(){
     fi
 
     echo "$image_spec"
+}
+
+function get_ha_status() {
+    local havmid="$1"
+    ha_status=$(ha-manager status| grep vm:"$havmid" | cut -d " " -f 4| sed 's/.$//')
+    echo "$ha_status"
 }
 
 function main(){    
