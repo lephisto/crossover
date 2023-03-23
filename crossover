@@ -433,6 +433,11 @@ function mirror() {
     map_vmids_to_host
     map_vmids_to_dsthost "$opt_destination"
 
+    if [ $(check_pool_exist "$opt_pool") -eq 0 ]; then
+        log error "Preflight check: Destination RBD-Pool $opt_pool does not exist."
+        end_process 255
+    fi
+
     for vm_id in $svmids; do
         (( vmcount++ ))
         local file_config; file_config=$(get_config_file)
@@ -814,6 +819,18 @@ function get_ha_status() {
     local havmid="$1"
     ha_status=$(ha-manager status| grep vm:"$havmid" | cut -d " " -f 4| sed 's/.$//')
     echo "$ha_status"
+}
+
+function check_pool_exist() {
+    local poolname="$1"
+    local -i exists=255
+    pool_status=$(ssh $opt_destination pvesm status|grep rbd|cut -d " " -f 1|grep $poolname)
+    if [ "$pool_status" == "$poolname" ]; then
+        exists=1
+    else
+        exists=0
+    fi
+    echo $exists
 }
 
 function main(){    
