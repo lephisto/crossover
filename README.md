@@ -86,6 +86,7 @@ It'll work according this scheme:
 * Retention policy: (eg. keep x snapshots on the source and y snapshots in the destination cluster)
 * Rewrites VM configurations so they match the new VMID and/or poolname on the destination
 * Secure an encrypted transfer (SSH), so it's safe to mirror between datacenter without an additional VPN
+* Near live-migrate: To move a VM from one Cluster to another, make an initial copy and re-run with --migrate. This will shutdown the VM on the source cluster and start it on the destination cluster.
 
 ## Installation of prerequisites
 
@@ -99,9 +100,9 @@ git clone https://github.com/lephisto/crossover/ /opt
 
 Ensure that you can freely ssh from the Node you plan to mirror _from_ to _all_ nodes in the destination cluster, as well as localhost.
 
-## Examples
+## Continuous replication between Clusters
 
-Mirror VM to another Cluster:
+Example 1: Mirror VM to another Cluster:
 
 ```
 root@pve01:~/crossover# ./crossover mirror --vmid=all --prefixid=99 --excludevmids=101 --destination=pve04 --pool=data2 --overwrite --online 
@@ -136,6 +137,7 @@ Full xmitted..........: 0 byte
 Differential Bytes ...: 372.96 KiB
 
 ```
+
 This example creates a mirror of VM 100 (in the source cluster) as VM 10100 (in the destination cluster) using the ceph pool "data2" for storing all attached disks. It will keep 4 Ceph snapshots prior the latest (in total 5) and 8 snapshots on the remote cluster. It will keep the VM on the target Cluster locked to avoid an accidental start (thus causing split brain issues), and will do it even if the source VM is running. 
 
 The use case is that you might want to keep a cold-standby copy of a certain VM on another Cluster. If you need to start it on the target cluster you just have to unlock it with `qm unlock VMID` there.
@@ -145,6 +147,78 @@ Another usecase could be that you want to migrate a VM from one cluster to anoth
 ## Near-live Migration 
 
 To minimize downtime and achive a near-live Migration from one Cluster to another it's recommended to do an initial Sync of a VM from the source to the destination cluster. After that, run the job again, and add the --migrate switch. This causes the source VM to be shut down prior snapshot + transfer, and be restarted on the destination cluster as soon as the incremental transfer is complete. Using --migrate will always try to start the VM on the destination cluster.
+
+Example 2: Near-live migrate VM from one cluster to another (Run initial replication first, which works online, then run with --migrate to shutdown on source, incrematally copy and start on destination):
+
+```
+root@pve01:~/crossover# ./crossover mirror --jobname=migrate --vmid=100 --destination=pve04 --pool=data2 --online
+ACTION: Onlinemirror
+Start mirror 2023-04-26 15:02:24
+VM 100 - Starting mirror for testubuntu
+VM 100 - Checking for VM 100 on destination cluster pve04 /etc/pve/nodes/*/qemu-server
+VM 100 - Transmitting Config for to destination pve04 VMID 100
+VM 100 - locked 100 [rc:0] on source
+VM 100 - locked 100 [rc:0] on destination
+VM 100 - Creating snapshot data/vm-100-disk-0@mirror-20230426150224
+VM 100 - Creating snapshot data/vm-100-disk-1@mirror-20230426150224
+VM 100 - unlocked source VM 100 [rc:0]
+VM 100 - F data/vm-100-disk-0@mirror-20230426150224: e:0:09:20 r:            c:[36.6MiB/s] a:[36.6MiB/s] 20.0GiB [===============================>] 100%
+VM 100 - created snapshot on 100 [rc:0]
+VM 100 - Disk Summary: Took 560 Seconds to transfer 20.00 GiB in a full run
+VM 100 - F data/vm-100-disk-1@mirror-20230426150224: e:0:00:40 r:            c:[50.7MiB/s] a:[50.7MiB/s] 2.00GiB [===============================>] 100%
+VM 100 - created snapshot on 100 [rc:0]
+VM 100 - Disk Summary: Took 40 Seconds to transfer 22.00 GiB in a full run
+VM 100 - Unlocking destination VM 100
+Finnished mirror 2023-04-26 15:13:47
+Job Summary: Bytes transferred 22.00 GiB for 2 Disks on 1 VMs in 00 hours 11 minutes 23 seconds
+VM Freeze OK/failed.......: 1/0
+RBD Snapshot OK/failed....: 2/0
+RBD export-full OK/failed.: 2/0
+RBD export-diff OK/failed.: 0/0
+Full xmitted..............: 22.00 GiB
+Differential Bytes .......: 0 Bytes
+
+root@pve01:~/crossover# ./crossover mirror --jobname=migrate --vmid=100 --destination=pve04 --pool=data2 --online --migrate
+ACTION: Onlinemirror
+Start mirror 2023-04-26 15:22:35
+VM 100 - Starting mirror for testubuntu
+VM 100 - Checking for VM 100 on destination cluster pve04 /etc/pve/nodes/*/qemu-server
+VM 100 - Migration requested, shutting down VM on pve01
+VM 100 - locked 100 [rc:0] on source
+VM 100 - locked 100 [rc:0] on destination
+VM 100 - Creating snapshot data/vm-100-disk-0@mirror-20230426152235
+VM 100 - Creating snapshot data/vm-100-disk-1@mirror-20230426152235
+VM 100 - I data/vm-100-disk-0@mirror-20230426152235: e:0:00:03 c:[1.29MiB/s] a:[1.29MiB/s] 4.38MiB
+VM 100 - Housekeeping: localhost data/vm-100-disk-0, keeping Snapshots for 0s
+VM 100 - Removing Snapshot localhost data/vm-100-disk-0@mirror-20230323162532 (2930293s) [rc:0]
+VM 100 - Removing Snapshot localhost data/vm-100-disk-0@mirror-20230426144911 (2076s) [rc:0]
+VM 100 - Removing Snapshot localhost data/vm-100-disk-0@mirror-20230426145632 (1637s) [rc:0]
+VM 100 - Removing Snapshot localhost data/vm-100-disk-0@mirror-20230426145859 (1492s) [rc:0]
+VM 100 - Removing Snapshot localhost data/vm-100-disk-0@mirror-20230426150224 (1290s) [rc:0]
+VM 100 - Housekeeping: pve04 data2/vm-100-disk-0-data, keeping Snapshots for 0s
+VM 100 - Removing Snapshot pve04 data2/vm-100-disk-0-data@mirror-20230426150224 (1293s) [rc:0]
+VM 100 - Disk Summary: Took 4 Seconds to transfer 4.37 MiB in a incremental run
+VM 100 - I data/vm-100-disk-1@mirror-20230426152235: e:0:00:00 c:[ 227 B/s] a:[ 227 B/s] 74.0 B
+VM 100 - Housekeeping: localhost data/vm-100-disk-1, keeping Snapshots for 0s
+VM 100 - Removing Snapshot localhost data/vm-100-disk-1@mirror-20230323162532 (2930315s) [rc:0]
+VM 100 - Removing Snapshot localhost data/vm-100-disk-1@mirror-20230426144911 (2098s) [rc:0]
+VM 100 - Removing Snapshot localhost data/vm-100-disk-1@mirror-20230426145632 (1659s) [rc:0]
+VM 100 - Removing Snapshot localhost data/vm-100-disk-1@mirror-20230426145859 (1513s) [rc:0]
+VM 100 - Removing Snapshot localhost data/vm-100-disk-1@mirror-20230426150224 (1310s) [rc:0]
+VM 100 - Housekeeping: pve04 data2/vm-100-disk-1-data, keeping Snapshots for 0s
+VM 100 - Removing Snapshot pve04 data2/vm-100-disk-1-data@mirror-20230426150224 (1313s) [rc:0]
+VM 100 - Disk Summary: Took 2 Seconds to transfer 4.37 MiB in a incremental run
+VM 100 - Unlocking destination VM 100
+VM 100 - Starting VM on pve01
+Finnished mirror 2023-04-26 15:24:25
+Job Summary: Bytes transferred 4.37 MiB for 2 Disks on 1 VMs in 00 hours 01 minutes 50 seconds
+VM Freeze OK/failed.......: 0/0
+RBD Snapshot OK/failed....: 2/0
+RBD export-full OK/failed.: 0/0
+RBD export-diff OK/failed.: 2/0
+Full xmitted..............: 0 Bytes
+Differential Bytes .......: 4.37 MiB
+```
 
 ## Things to check
 

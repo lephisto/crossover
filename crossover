@@ -448,7 +448,7 @@ function mirror() {
         log info "VM $vm_id - Starting mirror for $(echowhite "$vmname")"
         srcvmgenid=$(cat $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf | sed -e ''$restripsnapshots'' | grep vmgenid | sed -r -e 's/^vmgenid:\s(.*)/\1/')
         dstvmgenid=$(ssh $opt_destination cat $PVE_NODES/"${dstpvnode[$dvmid]}"/$QEMU/"$dvmid".conf 2>/dev/null | grep vmgenid | sed -e ''$restripsnapshots'' | sed -r -e 's/^vmgenid:\s(.*)/\1/')
-        log info "VM $vm_id - Checking for VM $dvmid on Destination Host $opt_destination $QEMU_CONF_CLUSTER"
+        log info "VM $vm_id - Checking for VM $dvmid on destination cluster $opt_destination $QEMU_CONF_CLUSTER"
         log debug "DVMID:$dvmid srcvmgenid:$srcvmgenid dstvmgenid:$dstvmgenid"
         conf_on_destination=$(ssh $opt_destination "ls -d $QEMU_CONF_CLUSTER/$dvmid$EXT_CONF 2>/dev/null")
         [[ "$conf_on_destination" =~ $redstconf ]]
