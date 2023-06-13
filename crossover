@@ -79,6 +79,7 @@ declare -r redstconf='^\/etc\/pve\/nodes\/(.*)\/qemu-server\/([0-9]+).conf$'
 declare -r recephimg='([a-zA-Z0-9]+)\:(.*)'
 declare -r restripsnapshots='/^$/,$d'
 declare -r redateex='^([0-9]{4})([0-9]{2})([0-9]{2})([0-9]{2})([0-9]{2})([0-9]{2})$'
+declare -r restripansicolor='s/\x1b\[[0-9;]*m//g'
 
 function usage(){
    shift
@@ -121,6 +122,7 @@ Options:
     --influxtoken        Influx API token with write permission
     --influxbucket       Influx Bucket to write to (e.g. --influxbucket=telegraf/autogen)
     --jobname            Descriptive name for the job, used in Statistics
+    --mail               Mail address to send report to, comma-seperated (e.g. --mail=admin@test.com,admin2@test.com)
 Switches:
     --online             Allow online Copy
     --migrate            Stop VM on Source Cluster before final Transfer and start on destination Cluster
@@ -142,7 +144,7 @@ function parse_opts(){
     local args
     args=$(getopt \
            --options '' \
-           --longoptions=vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,rewrite:,influxurl:,influxorg:,influxtoken:,influxbucket:,jobname:,mail:,online,migrate,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug \
+           --longoptions=vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,rewrite:,influxurl:,influxorg:,influxtoken:,influxbucket:,jobname:,mail:,online,migrate,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug,syslog \
            --name "$PROGNAME" \
            -- "$@") \
            || end_process 128
@@ -173,6 +175,7 @@ function parse_opts(){
         --keep-slock) opt_keepslock=1; shift;;
         --keep-dlock) opt_keepdlock=1; shift;;
         --overwrite) opt_overwrite=1; shift;;
+        --syslog) opt_syslog=1; shift;;
         --) shift; break;;
         *) break;;
       esac
@@ -343,6 +346,7 @@ function log(){
     local level=$1
     shift 1
     local message=$*
+    local syslog_msg=''
 
     case $level in
         debug) 
@@ -354,28 +358,32 @@ function log(){
 
         info) 
             echo -e "$message"; 
-            echo -e "$message" >> "$LOG_FILE";
-            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" "$message"
+            echo -e "$message" | sed -e 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE";
+            syslog_msg=$(echo -e "$message" | sed -e ${restripansicolor})
+            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" "$syslog_msg"
             ;;
 
         warn)
             echo -n "$(echoyellow 'WARNING: ')"
             echowhite "$message" 1>&2
-            echo -e "$message" >> "$LOG_FILE";            
-            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" -p daemon.warn "$message"
+            echo -e "$message" | sed -e ${restripansicolor} >> "$LOG_FILE";            
+            syslog_msg=$(echo -e "$message" | sed -e ${restripansicolor})
+            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" -p daemon.warn "$syslog_msg"
             ;;
         
         error)
             echo -n "$(echored 'ERROR: ')"
             echowhite "$message" 1>&2
-            echo -e "$message" >> "$LOG_FILE";            
-            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" -p daemon.err "$message"
+            echo -e "$message" | sed -e ${restripansicolor} >> "$LOG_FILE";            
+            syslog_msg=$(echo -e "$message" | sed -e ${restripansicolor})
+            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" -p daemon.err "$syslog_msg"
             ;;
 
         *)  
             echo "$message" 1>&2
-            echo -e "$message" >> "$LOG_FILE";            
-            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" "$message"
+            echo -e "$message" | sed -e ${restripansicolor} >> "$LOG_FILE";            
+            syslog_msg=$(echo -e "$message" | sed -e ${restripansicolor})
+            [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" "$syslog_msg"
             ;;
     esac
 }
@@ -797,18 +805,14 @@ function end_process(){
     ss_total=$(expr $perf_ss_ok + $perf_ss_failed)
     subject="Crossover [VM:$perf_vm_ok/$vmcount SS:$perf_ss_ok/$ss_total]"
     [ $rc != 0 ] && subject="[ERROR] $subject" || subject="[OK] $subject"
-    echo "Subject: $subject"
 
-    #send email
     local mail;
-#    local mailhead="Backup $perf Images in $vmcount VMs (Bytes: $bytecount)"
     for mail in $(echo "$opt_addr_mail" | tr "," "\n"); do
         do_run "cat '$LOG_FILE' | mail -s '$subject' '$mail'"
     done
 
     #remove log
     rm "$LOG_FILE"
-
     exit "$rc";
 }
 
