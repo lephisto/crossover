@@ -16,8 +16,9 @@ declare opt_influx_summary_metrics='crossover_jobs'
 # Cross Pool Migration and incremental replication Tool for Proxmox VMs using Ceph.
 # Author: Bastian Mäuser <bma@netz.org>        
 
+name=$(basename "$0")
+declare -r NAME=$name
 declare -r VERSION=0.7
-declare -r NAME=$(basename "$0")
 declare -r PROGNAME=${NAME%.*}
 
 declare -r PVE_DIR="/etc/pve"
@@ -28,7 +29,8 @@ declare -r EXT_CONF='.conf'
 declare -r PVFORMAT_FULL='e:%t r:%e c:%r a:%a %b %p'
 declare -r PVFORMAT_SNAP='e:%t c:%r a:%a %b'
 
-declare -r LOG_FILE=$(mktemp)
+logfile=$(mktemp)
+declare -r LOG_FILE=$logfile
 
 declare -A -g pvnode
 declare -A -g dstpvnode
@@ -119,7 +121,7 @@ Options:
     --jobname            Descriptive name for the job, used in Statistics
 Switches:
     --online             Allow online Copy
-    --migrate            Stop VM on Source Cluster before final Transfer and restart on destination Cluster
+    --migrate            Stop VM on Source Cluster before final Transfer and start on destination Cluster
     --nolock             Don't lock source VM on Transfer (mainly for test purposes)
     --keep-slock         Keep source VM locked on Transfer
     --keep-dlock         Keep VM locked after transfer on Destination
@@ -129,7 +131,6 @@ Switches:
 Report bugs to <mephisto@mephis.to>
 
 EOF
-    exit 1
 }
 
 function parse_opts(){
@@ -181,7 +182,7 @@ function parse_opts(){
         log info "============================================"
         log info "Proxmox VE Version:"
 
-        echowhite $(pveversion)
+        echowhite "$(pveversion)"
 
         log info "============================================"
     fi
@@ -355,15 +356,15 @@ function log(){
             ;;
 
         warn)
-            echo -n $(echoyellow "WARNING: ")
-            echo $(echowhite "$message") 1>&2
+            echo -n "$(echoyellow 'WARNING: ')"
+            echowhite "$message" 1>&2
             echo -e "$message" >> "$LOG_FILE";            
             [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" -p daemon.warn "$message"
             ;;
         
         error)
-            echo -n $(echored "ERROR: ")
-            echo $(echowhite "$message") 1>&2
+            echo -n "$(echored 'ERROR: ')"
+            echowhite "$message" 1>&2
             echo -e "$message" >> "$LOG_FILE";            
             [ $opt_syslog -eq 1 ] && logger -t "$PROGNAME" -p daemon.err "$message"
             ;;
@@ -427,13 +428,11 @@ function mirror() {
         end_process 1
     fi
 
-    
-
     map_source_to_destination_vmid
     map_vmids_to_host
     map_vmids_to_dsthost "$opt_destination"
 
-    if [ $(check_pool_exist "$opt_pool") -eq 0 ]; then
+    if [ "$(check_pool_exist "$opt_pool")" -eq 0 ]; then
         log error "Preflight check: Destination RBD-Pool $opt_pool does not exist."
         end_process 255
     fi
@@ -447,10 +446,10 @@ function mirror() {
         vmname=$(cat $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf | sed -e ''$restripsnapshots'' | grep "name\:" | cut -d' ' -f 2)
         log info "VM $vm_id - Starting mirror for $(echowhite "$vmname")"
         srcvmgenid=$(cat $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf | sed -e ''$restripsnapshots'' | grep vmgenid | sed -r -e 's/^vmgenid:\s(.*)/\1/')
-        dstvmgenid=$(ssh $opt_destination cat $PVE_NODES/"${dstpvnode[$dvmid]}"/$QEMU/"$dvmid".conf 2>/dev/null | grep vmgenid | sed -e ''$restripsnapshots'' | sed -r -e 's/^vmgenid:\s(.*)/\1/')
+        dstvmgenid=$(ssh "$opt_destination" cat $PVE_NODES/"${dstpvnode[$dvmid]}"/$QEMU/"$dvmid".conf 2>/dev/null | grep vmgenid | sed -e ''$restripsnapshots'' | sed -r -e 's/^vmgenid:\s(.*)/\1/')
         log info "VM $vm_id - Checking for VM $dvmid on destination cluster $opt_destination $QEMU_CONF_CLUSTER"
         log debug "DVMID:$dvmid srcvmgenid:$srcvmgenid dstvmgenid:$dstvmgenid"
-        conf_on_destination=$(ssh $opt_destination "ls -d $QEMU_CONF_CLUSTER/$dvmid$EXT_CONF 2>/dev/null")
+        conf_on_destination=$(ssh "$opt_destination" "ls -d $QEMU_CONF_CLUSTER/$dvmid$EXT_CONF 2>/dev/null")
         [[ "$conf_on_destination" =~ $redstconf ]]
         host_on_destination=${BASH_REMATCH[1]}
 
@@ -490,9 +489,9 @@ function mirror() {
 
         #Lock on source + destination
         if [ $opt_lock -eq 1 ]; then
-            do_run "ssh root@"${pvnode[$vm_id]}" qm set "$vm_id" --lock backup" >/dev/null
+            do_run "ssh root@""${pvnode[$vm_id]}"" qm set ""$vm_id"" --lock backup" >/dev/null
             log info "VM $vm_id - locked $vm_id [rc:$?] on source"
-            do_run "ssh root@"${dstpvnode[$dvmid]}" qm set "$dvmid" --lock backup" >/dev/null
+            do_run "ssh root@""${dstpvnode[$dvmid]}"" qm set ""$dvmid"" --lock backup" >/dev/null
             log info "VM $dvmid - locked $dvmid [rc:$?] on destination"
         fi
         #Freeze fs only if no migration running
@@ -629,7 +628,7 @@ function mirror() {
         #--migrate so start on destination?
         if [ $opt_migrate -eq 1 ]; then
             log info "VM $dvmid - Starting VM on ${pvnode[$vm_id]}"
-            do_run "ssh root@"${dstpvnode[$dvmid]}" qm start "$dvmid >/dev/null
+            do_run "ssh root@""${dstpvnode[$dvmid]}"" qm start "$dvmid >/dev/null
         fi
 
     done
