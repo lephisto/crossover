@@ -53,6 +53,8 @@ declare -g -i perf_bytes_total=0
 declare -g -i perf_vm_running=0
 declare -g -i perf_vm_stopped=0
 declare -g -i perf_snaps_removed=0
+declare -g -i perf_vm_total=0
+declare -g -i perf_vm_ok=0
 
 declare opt_destination
 declare opt_vm_ids=''
@@ -140,7 +142,7 @@ function parse_opts(){
     local args
     args=$(getopt \
            --options '' \
-           --longoptions=vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,rewrite:,influxurl:,influxorg:,influxtoken:,influxbucket:,jobname:,online,migrate,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug \
+           --longoptions=vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,rewrite:,influxurl:,influxorg:,influxtoken:,influxbucket:,jobname:,mail:,online,migrate,nolock,keep-slock,keep-dlock,overwrite,dry-run,debug \
            --name "$PROGNAME" \
            -- "$@") \
            || end_process 128
@@ -162,6 +164,7 @@ function parse_opts(){
         --influxtoken) opt_influx_token=$2; shift 2;;
         --influxbucket) opt_influx_bucket=$2; shift 2;;
         --jobname) opt_influx_jobname=$2; shift 2;;
+        --mail) opt_addr_mail="$2"; shift 2;;
         --online) opt_online=1; shift ;;
         --migrate) opt_migrate=1; shift ;;
         --dry-run) opt_dry_run=1; shift;;
@@ -499,7 +502,7 @@ function mirror() {
             vm_freeze "$vm_id" "${pvnode[$vm_id]}" >/dev/null
             freezerc=$?
             if [ $freezerc -gt 0 ]; then
-                log error "VM $vm_id - QEMU-Guest could not fsfreeze on guest."
+                log warn "VM $vm_id - QEMU-Guest could not fsfreeze on guest."
                 (( perf_freeze_failed++ ))
             else
                 (( perf_freeze_ok++ ))
@@ -510,7 +513,7 @@ function mirror() {
             create_snapshot "$src_image_spec@$opt_snapshot_prefix$timestamp" 2>/dev/null
             ssrc=$?
             if [ $ssrc -gt 0 ]; then
-                log error "VM $vm_id - rbd snap failed."
+                log warn "VM $vm_id - rbd snap failed."
                 (( perf_ss_failed++ ))
             else
                 (( perf_ss_ok++ ))
@@ -653,6 +656,8 @@ function mirror() {
         cmd="curl --request POST \"$opt_influx_api_url/v2/write?org=$opt_influx_api_org&bucket=$opt_influx_bucket&precision=ns\" --header \"Authorization: Token $opt_influx_token\" --header \"Content-Type: text/plain; charset=utf-8\" --header \"Accept: application/json\" --data-binary '$influxlp'"
         do_run "$cmd"
     fi
+    (( perf_vm_ok++ ))
+    end_process 0
 }
 
 function do_housekeeping(){
@@ -781,22 +786,28 @@ function do_run(){
 
 function end_process(){
     local -i rc=$1;
-#    if ! [[ -z "$startts" && -z "$endts" ]]; then
-#        local -i runtime=$(expr $endts - $startts)
-#        local -i bps=$(expr $bytecount/$runtime)
-#    fi
-#    local subject="Ceph [VM:$vmok/$vmtotal SS:$snapshotok/$snapshottotal EX:$exportok/$exporttotal] [$(bytesToHuman "$bytecount")@$(bytesToHuman "$bps")/s]"
-#    [ $rc != 0 ] && subject="$subject [ERROR]"
+    local -i runtime
+    local -i bps
+    local -i ss_total
+    local subject
+    if ! [[ -z "$startjob" && -z "$endjob" ]]; then
+        runtime=$(expr $endjob - $startjob)
+        bps=$(expr $perf_bytes_total/$runtime)
+    fi
+    ss_total=$(expr $perf_ss_ok + $perf_ss_failed)
+    subject="Crossover [VM:$perf_vm_ok/$vmcount SS:$perf_ss_ok/$ss_total]"
+    [ $rc != 0 ] && subject="[ERROR] $subject" || subject="[OK] $subject"
+    echo "Subject: $subject"
 
     #send email
-#    local mail;
-#    local mailhead="Backup $imgcount Images in $vmcount VMs (Bytes: $bytecount)"
-#    for mail in $(echo "$opt_addr_mail" | tr "," "\n"); do
-#        do_run "cat '$LOG_FILE' | mail -s '$subject' '$mail'"
-#    done
+    local mail;
+#    local mailhead="Backup $perf Images in $vmcount VMs (Bytes: $bytecount)"
+    for mail in $(echo "$opt_addr_mail" | tr "," "\n"); do
+        do_run "cat '$LOG_FILE' | mail -s '$subject' '$mail'"
+    done
 
     #remove log
-#    rm "$LOG_FILE"
+    rm "$LOG_FILE"
 
     exit "$rc";
 }
