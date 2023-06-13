@@ -18,7 +18,7 @@ declare opt_influx_summary_metrics='crossover_jobs'
 
 name=$(basename "$0")
 declare -r NAME=$name
-declare -r VERSION=0.7
+declare -r VERSION=0.8
 declare -r PROGNAME=${NAME%.*}
 
 declare -r PVE_DIR="/etc/pve"
