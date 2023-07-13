@@ -727,8 +727,8 @@ function vm_freeze() {
     status=$(ssh root@"$fhost" qm status "$fvm"|cut -d' ' -f 2)
     if ! [[ "$status" == "running" ]]; then
         log info "VM $fvm - Not running, skipping fsfreeze-freeze"
-        return
         (( perf_vm_stopped++ ))
+        return
     else 
         (( perf_vm_running++ ))
     fi
