@@ -415,6 +415,8 @@ function mirror() {
     local -i endjob
     local -i vmcount=0
     local -i diskcount=0
+    local -i startdowntime
+    local -i enddowntime
 
     local disp_perf_freeze_failed
     local disp_perf_ss_failed
@@ -496,6 +498,7 @@ function mirror() {
                 do_run "ha-manager remove $vm_id"
             fi
             do_run "ssh root@${pvnode[$vm_id]} qm shutdown $vm_id >/dev/null"
+            startdowntime=$(date +%s)
         fi
 
         #Lock on source + destination
@@ -638,8 +641,10 @@ function mirror() {
         fi
         #--migrate so start on destination?
         if [ $opt_migrate -eq 1 ]; then
-            log info "VM $dvmid - Starting VM on ${pvnode[$vm_id]}"
+            log info "VM $dvmid - Starting VM on ${dstpvnode[$dvmid]}"
             do_run "ssh root@""${dstpvnode[$dvmid]}"" qm start "$dvmid >/dev/null
+            enddowntime=$(date +%s)
+            log info "VM $dvmid - Downtime: $(( enddowntime - startdowntime )) Seconds"
         fi
 
     done
