@@ -309,20 +309,6 @@ function get_vm_ids(){
     echo "$data"
 }
 
-function get_config_file(){
-    local file_config=''
-
-    if exist_file "$QEMU_CONF_CLUSTER/$vm_id$EXT_CONF"; then
-        file_config=$(ls $QEMU_CONF_CLUSTER/$vm_id$EXT_CONF)
-
-    else
-        log error "VM $vm_id - Unknown technology or VMID not found: $QEMU_CONF_CLUSTER/$vm_id$EXT_CONF"
-        end_process 128
-    fi 
-
-    echo "$file_config"
-}
-
 function get_disks_from_config(){
     local disks;
     local file_config=$1
@@ -451,9 +437,12 @@ function mirror() {
     fi
 
     for vm_id in $svmids; do
+        file_config="$PVE_NODES/${pvnode[$vm_id]}/$QEMU/$vm_id.conf"
+        if ! exist_file "$file_config"; then
+            log error "VM $vm_id - Preflight check: VM $vm_id does not exist on source cluster - skipping to next VM."
+            continue
+        fi
         (( vmcount++ ))
-        local file_config; file_config=$(get_config_file)
-        [ -z "$file_config" ] && continue
         local disk=''
         dvmid=${dvmids[$vm_id]}
         vmname=$(cat $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf | sed -e ''$restripsnapshots'' | grep "name\:" | cut -d' ' -f 2)
@@ -803,7 +792,7 @@ function end_process(){
     local -i bps
     local -i ss_total
     local subject
-    if ! [[ -z "$startjob" && -z "$endjob" ]]; then
+    if ! [[ -z "$startjob" || -z "$endjob" ]]; then
         runtime=$(expr $endjob - $startjob)
         bps=$(expr $perf_bytes_total/$runtime)
     fi
