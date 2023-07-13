@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Cross Pool Migration and incremental replication Tool for Proxmox VMs using Ceph.
+# Author: Bastian Mäuser <bma@netz.org>        
+
 LC_ALL="en_US.UTF-8"
 
 source rainbow.sh
@@ -13,14 +16,11 @@ declare opt_influx_jobname=''
 declare opt_influx_job_metrics='crossover_xmit'
 declare opt_influx_summary_metrics='crossover_jobs'
 
-# Cross Pool Migration and incremental replication Tool for Proxmox VMs using Ceph.
-# Author: Bastian Mäuser <bma@netz.org>        
-
 name=$(basename "$0")
+# readonly variables
 declare -r NAME=$name
 declare -r VERSION=0.8
 declare -r PROGNAME=${NAME%.*}
-
 declare -r PVE_DIR="/etc/pve"
 declare -r PVE_NODES="$PVE_DIR/nodes"
 declare -r QEMU='qemu-server'
@@ -28,15 +28,19 @@ declare -r QEMU_CONF_CLUSTER="$PVE_NODES/*/$QEMU"
 declare -r EXT_CONF='.conf'
 declare -r PVFORMAT_FULL='e:%t r:%e c:%r a:%a %b %p'
 declare -r PVFORMAT_SNAP='e:%t c:%r a:%a %b'
-
 logfile=$(mktemp)
 declare -r LOG_FILE=$logfile
 
+# associative global arrays 
 declare -A -g pvnode
 declare -A -g dstpvnode
 declare -A -g svmids
 declare -A -g dvmids
 
+declare -g scluster
+declare -g dcluster
+
+# global integers
 declare -g -i perf_freeze_ok=0
 declare -g -i perf_freeze_failed=0
 declare -g -i perf_ss_ok=0
@@ -56,6 +60,7 @@ declare -g -i perf_snaps_removed=0
 declare -g -i perf_vm_total=0
 declare -g -i perf_vm_ok=0
 
+# commandline parameters
 declare opt_destination
 declare opt_vm_ids=''
 declare opt_snapshot_prefix='mirror-'
@@ -427,6 +432,9 @@ function mirror() {
         end_process 1
     fi
 
+    scluster=$(grep cluster_name /etc/pve/corosync.conf | cut -d " " -f 4)
+    dcluster=$(ssh "$opt_destination" grep cluster_name /etc/pve/corosync.conf | cut -d " " -f 4)
+
     map_source_to_destination_vmid
     map_vmids_to_host
     map_vmids_to_dsthost "$opt_destination"
@@ -439,7 +447,7 @@ function mirror() {
     for vm_id in $svmids; do
         file_config="$PVE_NODES/${pvnode[$vm_id]}/$QEMU/$vm_id.conf"
         if ! exist_file "$file_config"; then
-            log error "VM $vm_id - Preflight check: VM $vm_id does not exist on source cluster - skipping to next VM."
+            log error "VM $vm_id - Preflight check: VM $vm_id does not exist on source cluster [$scluster] - skipping to next VM."
             continue
         fi
         (( vmcount++ ))
@@ -458,7 +466,7 @@ function mirror() {
         if [ $host_on_destination ]; then
             dststatus=$(ssh root@${dstpvnode[$dvmid]} qm status $dvmid|cut -d' ' -f 2)
             if [ $dststatus == "running" ]; then
-                log error "VM is running on Destination. bailing out"
+                log error "VM is running on Destination Cluster [$dcluster]. bailing out"
                 end_process 255
             fi
         fi
@@ -630,7 +638,7 @@ function mirror() {
         fi
         #--migrate so start on destination?
         if [ $opt_migrate -eq 1 ]; then
-            log info "VM $dvmid - Starting VM on ${dstpvnode[$dvmid]}"
+            log info "VM $dvmid - Starting VM on node ${dstpvnode[$dvmid]} in cluster [$dcluster]"
             do_run "ssh root@""${dstpvnode[$dvmid]}"" qm start "$dvmid >/dev/null
             enddowntime=$(date +%s)
             log info "VM $dvmid - Downtime: $(( enddowntime - startdowntime )) Seconds"
