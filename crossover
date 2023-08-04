@@ -329,7 +329,7 @@ function get_disks_from_config(){
                 [[ "$line" == "" ]] && break
                 echo "$line" 
             done < "$file_config" | \
-            grep -P '^(?:((?:virtio|ide|scsi|sata|mp)\d+)|rootfs): ' | \
+            grep -P '^(?:((?:efidisk|virtio|ide|scsi|sata|mp)\d+)|rootfs): ' | \
             grep -v -P 'cdrom|none' | \
             grep -v -P 'backup=0' | \
             awk '{ split($0,a,","); split(a[1],b," "); print b[2]}')
@@ -412,6 +412,7 @@ function mirror() {
     local -i diskcount=0
     local -i startdowntime
     local -i enddowntime
+    local -i ga_ping
 
     local disp_perf_freeze_failed
     local disp_perf_ss_failed
@@ -451,6 +452,8 @@ function mirror() {
         esac
     fi
 
+
+
     map_source_to_destination_vmid
     map_vmids_to_host
     map_vmids_to_dsthost "$opt_destination"
@@ -464,6 +467,12 @@ function mirror() {
         file_config="$PVE_NODES/${pvnode[$vm_id]}/$QEMU/$vm_id.conf"
         if ! exist_file "$file_config"; then
             log error "VM $vm_id - Preflight check: VM $vm_id does not exist on source cluster [$scluster] - skipping to next VM."
+            continue
+        fi
+        ga_ping=$(gaping "$vm_id")
+        log debug "ga_ping: $ga_ping"
+        if [ "$ga_ping" -eq 255 ] ; then    #vm running but no qemu-guest-agent answering
+            log error "VM $vm_id - Preflight check: VM $vm_id on source cluster [$scluster] has no qemu-guest-agent running - skipping to next VM."
             continue
         fi
         (( vmcount++ ))
@@ -521,8 +530,8 @@ function mirror() {
             do_run "ssh root@""${dstpvnode[$dvmid]}"" qm set ""$dvmid"" --lock backup" >/dev/null
             log info "VM $dvmid - locked $dvmid [rc:$?] on destination"
         fi
-        #Freeze fs only if no migration running
-        if [ $opt_migrate -eq 0 ]; then
+        #Freeze fs only if no migration running and qemu-guest-agent okay.
+        if [ $opt_migrate -eq 0 ] && [ $ga_ping -eq 0 ]; then
             vm_freeze "$vm_id" "${pvnode[$vm_id]}" >/dev/null
             freezerc=$?
             if [ $freezerc -gt 0 ]; then
@@ -725,6 +734,15 @@ function do_housekeeping(){
     done
 }
 
+function gaping() {
+    local vmid=$1
+    local rc
+    cmd="ssh root@${pvnode[$vmid]} qm guest cmd $vmid ping >/dev/null 2>&1"
+    eval "$cmd"
+    rc=$?
+    echo $rc
+}
+
 function create_snapshot(){
     local snap="$1"
     log info "VM $vm_id - Creating snapshot $snap"
@@ -781,7 +799,7 @@ function rewriteconfig(){
     else
         sedcmd='sed -e /^$/,$d'
     fi
-    cat "$oldconfig" | sed -r -e "s/^(virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6-\3,\7/g" | $sedcmd | sed -e '/^$/,$d' | sed -e '/ide[0-9]:.*-cloudinit,media=cdrom.*/d' | grep -v "^parent:\s.*$" | ssh "$dst" "cat - >$newconfig"
+    cat "$oldconfig" | sed -r -e "s/^(efidisk|virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6-\3,\7/g" | $sedcmd | sed -e '/^$/,$d' | sed -e '/ide[0-9]:.*-cloudinit,media=cdrom.*/d' | grep -v "^parent:\s.*$" | ssh "$dst" "cat - >$newconfig"
 }
 
 function checkvmid(){
