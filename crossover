@@ -39,6 +39,8 @@ declare -A -g dvmids
 
 declare -g scluster
 declare -g dcluster
+declare -g scephversion
+declare -g dcephversion
 
 # global integers
 declare -g -i perf_freeze_ok=0
@@ -422,6 +424,9 @@ function mirror() {
     log info "ACTION: $(echowhite Onlinemirror)"
     log info "Start mirror $(date "+%F %T")"
     startjob=$(date +%s)
+
+    get_ceph_version
+    log info "Local Ceph Version: $scephversion, Remote Ceph version: $dcephversion"
 
     #create pid file
     local pid_file="/var/run/$PROGNAME.pid"
@@ -881,6 +886,11 @@ function check_pool_exist() {
         exists=0
     fi
     echo $exists
+}
+
+function get_ceph_version() {
+    scephversion=$(ceph -v | cut -d " " -f 3)
+    dcephversion=$(ssh $opt_destination ceph -v | cut -d " " -f 3)
 }
 
 function main(){    
