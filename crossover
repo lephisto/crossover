@@ -426,7 +426,7 @@ function mirror() {
     startjob=$(date +%s)
 
     get_ceph_version
-    log info "Local Ceph Version: $scephversion, Remote Ceph version: $dcephversion"
+    log info "Local Ceph Version: $scephversion, Remote Ceph Version: $dcephversion"
 
     #create pid file
     local pid_file="/var/run/$PROGNAME.pid"
@@ -512,7 +512,7 @@ function mirror() {
                 log error "Source VM genid ($srcvmgenid) doesn't match destination VM genid ($dstvmgenid). This should not happen. Bailing out.."
                 end_process 255
             fi
-            log info "VM $vm_id - Transmitting Config for to destination $opt_destination VMID $dvmid"
+            log info "VM $vm_id - Transmitting Config for VM $vm_id to destination $opt_destination VMID $dvmid"
             rewriteconfig $PVE_NODES/"${pvnode[$vm_id]}"/$QEMU/"$vm_id".conf $opt_destination "$opt_pool" $PVE_NODES/"$opt_destination"/$QEMU/"$dvmid".conf "$dvmid"
             map_vmids_to_dsthost "$opt_destination"
         fi
