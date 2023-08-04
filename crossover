@@ -446,7 +446,7 @@ function mirror() {
     dcluster=$(ssh "$opt_destination" grep cluster_name /etc/pve/corosync.conf | cut -d " " -f 4)
 
     if [ $opt_migrate -eq 1 ] && [ $opt_noconfirm -eq 0 ]; then
-        echo "VM(s) $opt_vm_ids will be shutdown on [$scluster] and started on [$dcluster]"
+        echo "VM(s) $opt_vm_ids will subsequently be shutdown on [$scluster] and started on [$dcluster]"
         read -p "Do you want to proceed? (yes/no) " yn
         case $yn in 
             yes ) echo ok, we will proceed;;
