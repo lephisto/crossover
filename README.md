@@ -222,13 +222,13 @@ Differential Bytes .......: 4.37 MiB
 
 ## Things to check
 
-From Proxmox VE Hosts you want to backup you need to be able to ssh passwordless to all other Cluster hosts, that may hold VM's or Containers. This goes for the source and for the destination Cluster.
+From Proxmox VE Hosts you want to backup you need to be able to ssh passwordless to all other Cluster hosts, that may hold VM's or Containers. This goes for the source and for the destination Cluster. Doublecheck this.
 
 This is required for using the free/unfreeze and the lock/unlock function, which has to be called locally from that Host the guest is currently running on. Usually this works out of the box for the source cluster, but you may want to make sure that you can "ssh root@pvehost1...n" from every host to every other host in the cluster.
 
-For the Destination Cluster you need to copy your ssh-key to the first host in the cluster, and login once to every node
-in your cluster.
+For the Destination Cluster you need to copy your ssh-key to the first host in the cluster, and login once to every node in your cluster.
 
+Currently preflight checks don't include the check for enough resources in the destination cluster. Check beforehand that you don't exceed the maximum safe size of ceph in the destination cluster.
 
 ## Some words about Snapshot consistency and what qemu-guest-agent can do for you
 
@@ -371,3 +371,4 @@ Ceph Documentation:
 
 Proxmox Wiki:
 https://pve.proxmox.com/wiki/
+
