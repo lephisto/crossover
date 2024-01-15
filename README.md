@@ -90,7 +90,8 @@ It'll work according this scheme:
 
 ## Installation of prerequisites
 
-```apt install git pv gawk jq
+```
+apt install git pv gawk jq curl
 
 ## Install the Script somewhere, eg to /opt
 
