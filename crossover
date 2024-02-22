@@ -298,7 +298,14 @@ function exist_file(){
 function lookupcephpool() {
     pvehost=$1
     pvepoolname=$2
-    res=$(ssh $pvehost cat /etc/pve/storage.cfg | sed -n "/rbd: $pvepoolname/,/^$/p" | grep pool | cut -d " " -f 2)
+    res=$(ssh $pvehost cat /etc/pve/storage.cfg | sed -n "/rbd: $pvepoolname/,/^$/p" | grep -E "\s+pool\s" | cut -d " " -f 2)
+    echo $res
+}
+
+function lookupdatapool() {
+    pvehost=$1
+    pvepoolname=$2
+    res=$(ssh $pvehost cat /etc/pve/storage.cfg | sed -n "/rbd: $pvepoolname/,/^$/p" | grep -E "\s+data-pool\s" | cut -d " " -f 2)
     echo $res
 }
 
@@ -582,6 +589,10 @@ function mirror() {
             [[ $dst_image_spec =~ ^.*\/(.*)$ ]]
             dst_image_name=${BASH_REMATCH[1]}-$src_image_pool_pve
             dst_image_pool=$(lookupcephpool $opt_destination $opt_pool)
+            dst_data_pool=$(lookupdatapool $opt_destination $opt_pool)
+            if [ -n "$dst_data_pool" ]; then
+                dst_data_opt="--data-pool $dst_data_pool"
+            fi
             snapshot_name="@$opt_snapshot_prefix$timestamp"
             localsnapcount=$(rbd ls -l $src_image_pool | grep $src_image_name@$opt_snapshot_prefix | cut -d ' ' -f 1|wc -l)
             if [ $localsnapcount -ge 2 ]; then
@@ -605,7 +616,7 @@ function mirror() {
                 #snapts=$(echo $currentlocal | sed -r -e 's/.*@mirror-(.*)/\1/')
                 snapshotsize=$(rbd du --pretty-format --format json $src_image_pool/$src_image_name|jq '.images[] | select (.snapshot_id == null) | {provisioned_size}.provisioned_size'|tail -1)
                 log debug "snapsize: $snapshotsize "
-                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -s $snapshotsize -F \"VM $vm_id - F $src_image_pool/$src_image_name$snapshot_name: $PVFORMAT_FULL\" | ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name  2>/dev/null"
+                xmitjob="rbd export --rbd-concurrent-management-ops 8 $src_image_pool/$src_image_name$snapshot_name --no-progress - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -s $snapshotsize -F \"VM $vm_id - F $src_image_pool/$src_image_name$snapshot_name: $PVFORMAT_FULL\" | ssh $opt_destination rbd import --image-format 2 - $dst_image_pool/$dst_image_name $dst_data_opt 2>/dev/null"
                 # create initial snapshot on destination
                 log debug "xmitjob: $xmitjob"
                 startdisk=$(date +%s)
@@ -633,7 +644,7 @@ function mirror() {
                     #disk was not attached, or really nothing has changed..
                     snapshotsize=0
                 fi
-                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -F \"VM $vm_id - I $src_image_pool/$src_image_name$snapshot_name: $PVFORMAT_SNAP\" | ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
+                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -F \"VM $vm_id - I $src_image_pool/$src_image_name$snapshot_name: $PVFORMAT_SNAP\" | ssh $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name $dst_data_opt"
                 log debug "xmitjob: $xmitjob"
                 startdisk=$(date +%s)
                 do_run "$xmitjob"
