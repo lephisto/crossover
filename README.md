@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/github/license/EnterpriseVE/eve4pve-barc.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
 
-Cross-Pool (live) Replication and near-live migration for Proxmox VE
+Cross-Pool asynchronous online-replication and near-live migration for Proxmox VE
 
 
 ```text
@@ -11,7 +11,7 @@ ______
 |   --|  _| . |_ -|_ -| . | | | -_|  _|
 |_____|_| |___|___|___|___|\_/|___|_|  
 
-Cross Pool (live) replication and near-live migration for Proxmox VE  
+Cross Pool asynchronous online-replication and near-live migration for Proxmox VE  
 
 Usage:
     crossover <COMMAND> [ARGS] [OPTIONS]
@@ -25,6 +25,7 @@ Commands:
     mirror               Replicate a stopped VM to another Cluster (full clone)
 
 Options:
+    --sshcipher          SSH Cipher to use for transfer (default: aes128-gcm@openssh.com,aes128-cbc)
     --vmid               The source+target ID of the VM, comma separated (eg. --vmid=100:100,101:101)
                          (The possibility to specify a different Target VMID is to not interfere with VMIDs on the
                          target cluster, or mark mirrored VMs on the destination)
