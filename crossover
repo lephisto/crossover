@@ -647,7 +647,7 @@ function mirror() {
                     #disk was not attached, or really nothing has changed..
                     snapshotsize=0
                 fi
-                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -F \"VM $vm_id - I $src_image_pool/$src_image_name$snapshot_name: $PVFORMAT_SNAP\" | ssh -c $opt_sshcipher $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name $dst_data_opt"
+                xmitjob="rbd export-diff --no-progress --from-snap $opt_snapshot_prefix$basets $src_image_pool/$currentlocal - | tee >({ wc -c; } >/tmp/$PROGNAME.$pid.$dst_image_pool-$dst_image_name.size) | pv -F \"VM $vm_id - I $src_image_pool/$src_image_name$snapshot_name: $PVFORMAT_SNAP\" | ssh -c $opt_sshcipher $opt_destination rbd import-diff --no-progress - $dst_image_pool/$dst_image_name"
                 log debug "xmitjob: $xmitjob"
                 startdisk=$(date +%s)
                 do_run "$xmitjob"
