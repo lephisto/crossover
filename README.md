@@ -232,6 +232,10 @@ For the Destination Cluster you need to copy your ssh-key to the first host in t
 
 Currently preflight checks don't include the check for enough resources in the destination cluster. Check beforehand that you don't exceed the maximum safe size of ceph in the destination cluster.
 
+## Unique Disk names
+
+There are cases, when the Source VM has Disks on different ceph pools. Now, in theory you can have identical image names for different disks. Since all disk images are migrated to one destination pool, they need to be unique. This tool detects this in Preflight checks, and skips these VMs and issues a warning. To solve this, give them unique names, like vm-100-disk-0, vm,100-disk-1 and so on. `rbd mv` will help you.
+
 ## Some words about Snapshot consistency and what qemu-guest-agent can do for you
 
 Bear in mind, that when taking a snapshot of a running VM, it's basically like if you have a server which gets pulled away from the Power. Often this is not cathastrophic as the next fsck will try to fix Filesystem Issues, but in the worst case this could leave you with a severely damaged Filesystem, or even worse, half written Inodes which were in-flight when the power failed lead to silent data corruption. To overcome these things, we have the qemu-guest-agent to improve the consistency of the Filesystem while taking a snapshot. It won't leave you a clean filesystem, but it sync()'s outstanding writes and halts all i/o until the snapshot is complete. Still, there might me issues on the Application layer. Databases processes might have unwritten data in memory, which is the most common case. Here you have the opportunity to do additional tuning, and use hooks to tell your vital processes things to do prio and post freezes.

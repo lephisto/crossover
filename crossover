@@ -363,6 +363,28 @@ function get_disks_from_config(){
     echo "$disks"
 }
 
+function check_unique_disk_config() {
+    local file_config=$1
+    disks=$(while read -r line; do
+                [[ "$line" == "" ]] && break
+                echo "$line" 
+            done < "$file_config" | \
+            grep -P '^(?:((?:efidisk|virtio|ide|scsi|sata|mp)\d+)|rootfs): ' | \
+            grep -v -P 'cdrom|none' | \
+            grep -v -P 'backup=0' | \
+            awk '{ split($0,a,","); split(a[1],b," "); print b[2]}'| wc -l)
+    uniquedisks=$(while read -r line; do
+                [[ "$line" == "" ]] && break
+                echo "$line" 
+            done < "$file_config" | \
+            grep -P '^(?:((?:efidisk|virtio|ide|scsi|sata|mp)\d+)|rootfs): ' | \
+            grep -v -P 'cdrom|none' | \
+            grep -v -P 'backup=0' | \
+            awk '{ split($0,a,","); split(a[1],b," "); print b[2]}'|cut -d ':' -f 2 | sort -nr | uniq | wc -l)
+    difference=$(expr $disks - $uniquedisks)
+    echo "$difference"
+}
+
 function log(){
     local level=$1
     shift 1
@@ -436,6 +458,8 @@ function mirror() {
     local -i endjob
     local -i vmcount=0
     local -i diskcount=0
+    local -i vmdiskcount=0
+    local -i skipped_vm_count=0
     local -i startdowntime
     local -i enddowntime
     local -i ga_ping
@@ -491,17 +515,23 @@ function mirror() {
         log error "Preflight check: Destination RBD-Pool $opt_pool does not exist."
         end_process 255
     fi
-
     for vm_id in $svmids; do
         file_config="$PVE_NODES/${pvnode[$vm_id]}/$QEMU/$vm_id.conf"
+        if [[ $(check_unique_disk_config "$file_config") -ge 1 ]]; then
+            log error "VM $vm_id - Preflight check: VM $vm_id has duplicate disk entries - skipping to next VM. Check Documentation to learn how to avoid this."
+            (( skipped_vm_count++ ))
+            continue
+        fi
         if ! exist_file "$file_config"; then
             log error "VM $vm_id - Preflight check: VM $vm_id does not exist on source cluster [$scluster] - skipping to next VM."
+            (( skipped_vm_count++ ))
             continue
         fi
         ga_ping=$(gaping "$vm_id")
         log debug "ga_ping: $ga_ping"
         if [ "$ga_ping" -eq 255 ] ; then    #vm running but no qemu-guest-agent answering
             log error "VM $vm_id - Preflight check: VM $vm_id on source cluster [$scluster] has no qemu-guest-agent running - skipping to next VM."
+            (( skipped_vm_count++ ))
             continue
         fi
         (( vmcount++ ))
@@ -594,17 +624,18 @@ function mirror() {
         fi
         for disk in $(get_disks_from_config "$file_config"); do
             (( diskcount++ ))
-            log debug "VMID: $vm_id Disk: $disk DESTVMID: $dvmid"
+            (( vmdiskcount++ ))
             src_image_spec=$(get_image_spec "$disk")
+            log debug "src_image_spec: $src_image_spec"
             [ -z "$src_image_spec" ] && continue
             dst_image_spec=$(echo $src_image_spec | sed -r -e "s/(.*\/[a-zA-Z0-9]+\-)([0-9]+)(\-[a-zA-Z0-9]+\-[0-9]+)/\1$dvmid\3/")
             [ -z "$dst_image_spec" ] && continue
             [[ $disk =~ $recephimg ]]
-	        src_image_pool_pve=${BASH_REMATCH[1]}
+#	        src_image_pool_pve=${BASH_REMATCH[1]}
             src_image_pool=$(lookupcephpool "localhost" ${BASH_REMATCH[1]})
             src_image_name=${BASH_REMATCH[2]}
             [[ $dst_image_spec =~ ^.*\/(.*)$ ]]
-            dst_image_name=${BASH_REMATCH[1]}-$src_image_pool_pve
+            dst_image_name=${BASH_REMATCH[1]} #-$src_image_pool_pve
             dst_image_pool=$(lookupcephpool $opt_destination $opt_pool)
             dst_data_pool=$(lookupdatapool $opt_destination $opt_pool)
             if [ -n "$dst_data_pool" ]; then
@@ -689,6 +720,7 @@ function mirror() {
                 do_run "$cmd"
             fi
             unset basets
+            vmdiskcount=0
         done
         if [ $opt_keepdlock -eq 0 ]; then
             ssh root@${dstpvnode[$dvmid]} qm unlock $dvmid
@@ -711,12 +743,14 @@ function mirror() {
     if [ "$perf_ss_failed" -gt 0 ]; then disp_perf_ss_failed="$(echored $perf_ss_failed)"; else disp_perf_ss_failed="$(echogreen $perf_ss_failed)"; fi
     if [ "$perf_full_failed" -gt 0 ]; then disp_perf_full_failed="$(echored $perf_full_failed)"; else disp_perf_full_failed="$(echogreen $perf_full_failed)"; fi
     if [ "$perf_diff_failed" -gt 0 ]; then disp_perf_diff_failed="$(echored $perf_diff_failed)"; else disp_perf_diff_failed="$(echogreen $perf_diff_failed)"; fi
+    if [ "$skipped_vm_count" -gt 0 ]; then disp_skipped_vm_count="$(echored $skipped_vm_count)"; else disp_skipped_vm_count="$(echogreen $skipped_vm_count)"; fi
     log info "VM Freeze OK/failed.......: $perf_freeze_ok/$disp_perf_freeze_failed"    
     log info "RBD Snapshot OK/failed....: $perf_ss_ok/$disp_perf_ss_failed"
     log info "RBD export-full OK/failed.: $perf_full_ok/$disp_perf_full_failed"
     log info "RBD export-diff OK/failed.: $perf_diff_ok/$disp_perf_diff_failed"
     log info "Full xmitted..............: $(human_readable $perf_bytes_full)"
     log info "Differential Bytes .......: $(human_readable $perf_bytes_diff)"
+    log info "Skipped VMs ..............: $disp_skipped_vm_count"
     if [ -n "$opt_influx_api_url" ]; then
         log info "VM $vm_id - Logging Job summary to InfluxDB: $opt_influx_api_url"
         influxlp="$opt_influx_summary_metrics,jobname=$opt_influx_jobname perf_bytes_diff=$perf_bytes_diff""i,perf_bytes_full=$perf_bytes_full""i,perf_bytes_total=$perf_bytes_total""i,perf_diff_failed=$perf_diff_failed""i,perf_diff_ok=$perf_diff_ok""i,perf_freeze_failed=$perf_freeze_failed""i,perf_freeze_ok=$perf_freeze_ok""i,perf_full_failed=$perf_full_failed""i,perf_full_ok=$perf_full_ok""i,perf_ss_failed=$perf_ss_failed""i,perf_ss_ok=$perf_ss_ok""i,perf_vm_running=$perf_vm_running""i,perf_vm_stopped=$perf_vm_stopped""i"
@@ -832,7 +866,7 @@ function rewriteconfig(){
     else
         sedcmd='sed -e /^$/,$d'
     fi
-    cat "$oldconfig" | sed -r -e "s/^(efidisk|virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6-\3,\7/g" | $sedcmd | sed -e '/^$/,$d' | sed -e '/ide[0-9]:.*-cloudinit,media=cdrom.*/d' | grep -v "^parent:\s.*$" | ssh "$dst" "cat - >$newconfig"
+    cat "$oldconfig" | sed -r -e "s/^(efidisk|virtio|ide|scsi|sata|mp)([0-9]+):\s([a-zA-Z0-9]+):(.*)-([0-9]+)-disk-([0-9]+).*,(.*)$/\1\2: $newpool:\4-$newvmid-disk-\6,\7/g" | $sedcmd | sed -e '/^$/,$d' | sed -e '/ide[0-9]:.*-cloudinit,media=cdrom.*/d' | grep -v "^parent:\s.*$" | ssh "$dst" "cat - >$newconfig"
 }
 
 function checkvmid(){
