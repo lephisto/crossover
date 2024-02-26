@@ -19,7 +19,7 @@ declare opt_influx_summary_metrics='crossover_jobs'
 name=$(basename "$0")
 # readonly variables
 declare -r NAME=$name
-declare -r VERSION=0.8
+declare -r VERSION=0.9
 declare -r PROGNAME=${NAME%.*}
 declare -r PVE_DIR="/etc/pve"
 declare -r PVE_NODES="$PVE_DIR/nodes"
@@ -69,6 +69,7 @@ declare opt_snapshot_prefix='mirror-'
 declare opt_rewrite=''
 declare opt_pool='rbd'
 declare opt_sshcipher='aes128-gcm@openssh.com,aes128-cbc'
+declare opt_tag=''
 declare -i opt_prefix_id
 declare opt_exclude_vmids=''
 declare -i opt_debug=0
@@ -120,6 +121,7 @@ Commands:
 
 Options:
     --sshcipher          SSH Cipher to use for transfer (default: aes128-gcm@openssh.com,aes128-cbc)
+    --tag                Include all VMs with a specific tag set in the Proxmox UI (if set, implies vmid=all)
     --vmid               The source+target ID of the VM/CT, comma separated (eg. --vmid=100:100,101:101), or all for all
     --prefixid           Prefix for VMID's on target System [optional]
     --excludevmids       Exclusde VM IDs when using --vmid==all
@@ -156,7 +158,7 @@ function parse_opts(){
     local args
     args=$(getopt \
            --options '' \
-           --longoptions=sshcipher:,vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,rewrite:,influxurl:,influxorg:,influxtoken:,influxbucket:,jobname:,mail:,online,migrate,nolock,keep-slock,keep-dlock,overwrite,dry-run,noconfirm,debug,syslog \
+           --longoptions=sshcipher:,tag:,vmid:,prefixid:,excludevmids:,destination:,pool:,keeplocal:,keepremote:,rewrite:,influxurl:,influxorg:,influxtoken:,influxbucket:,jobname:,mail:,online,migrate,nolock,keep-slock,keep-dlock,overwrite,dry-run,noconfirm,debug,syslog \
            --name "$PROGNAME" \
            -- "$@") \
            || end_process 128
@@ -166,6 +168,7 @@ function parse_opts(){
     while true; do    
       case "$1" in
         --sshcipher) opt_sshcipher=$2; shift 2;;
+        --tag) opt_tag=$2; shift 2;;
         --vmid) opt_vm_ids=$2; shift 2;;
         --prefixid) opt_prefix_id=$2; shift 2;;
         --excludevmids) opt_exclude_vmids=$2; shift 2;;
@@ -207,7 +210,6 @@ function parse_opts(){
         log info "============================================"
     fi
 
-    [ -z "$opt_vm_ids" ] && { log info "VM id is not set."; end_process 1; }
 
     [ -z "$opt_influx_jobname" ] && { log info "Jobname is not set."; end_process 1; }
 
@@ -230,6 +232,15 @@ function parse_opts(){
         end_process 255
     fi
 
+    if [ -n "$opt_tag" ] && [ -n "$opt_vm_ids" ] && [ "$opt_vm_ids" != "all" ]; then
+        log error "You can't use --tag and --vmid at the same time"
+        end_process 255
+    fi
+
+    [ -n "$opt_tag" ] && [ -z $opt_vm_ids ] && opt_vm_ids="all"
+
+    [ -z "$opt_vm_ids" ] && { log info "VM id is not set."; end_process 1; }
+
     if [ "$opt_vm_ids" = "all" ]; then
         local all=''
         local data=''
@@ -237,6 +248,7 @@ function parse_opts(){
         local ids=''
 
         all=$(get_vm_ids "$QEMU_CONF_CLUSTER/*$EXT_CONF" "$LXC_CONF_CLUSTER/*$EXT_CONF")
+        log debug "all: $all"
         all=$(echo "$all" | tr ',' "\n")
         opt_exclude_vmids=$(echo "$opt_exclude_vmids" | tr ',' "\n")
         for id in $all; do
@@ -257,7 +269,7 @@ function parse_opts(){
             vm_ids=$(echo "$opt_vm_ids" | tr ',' "\n")
         fi
     fi
-    log debug "vm_ids: $vm_ids"
+    
 }
 
 human_readable() {
@@ -319,7 +331,9 @@ function get_vm_ids(){
     while [ $# -gt 0 ]; do
         for conf in $1; do
             [ ! -e "$conf" ] && break
-
+            if [ -n "$opt_tag" ]  && ! grep -qE "^tags:\s.*$opt_tag(;|$)" $conf; then
+                continue
+            fi
             conf=$(basename "$conf")
             [ "$data" != '' ] && data="$data,"
             data="$data${conf%.*}"
