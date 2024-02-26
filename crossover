@@ -373,6 +373,7 @@ function check_unique_disk_config() {
             grep -v -P 'cdrom|none' | \
             grep -v -P 'backup=0' | \
             awk '{ split($0,a,","); split(a[1],b," "); print b[2]}'| wc -l)
+    echo disks            
     uniquedisks=$(while read -r line; do
                 [[ "$line" == "" ]] && break
                 echo "$line" 
@@ -381,6 +382,7 @@ function check_unique_disk_config() {
             grep -v -P 'cdrom|none' | \
             grep -v -P 'backup=0' | \
             awk '{ split($0,a,","); split(a[1],b," "); print b[2]}'|cut -d ':' -f 2 | sort -nr | uniq | wc -l)
+    # TBD: ^(vm|ct)-([0-9]+)-([a-z]+)-[\d]+.*$
     difference=$(expr $disks - $uniquedisks)
     echo "$difference"
 }
@@ -517,6 +519,8 @@ function mirror() {
     fi
     for vm_id in $svmids; do
         file_config="$PVE_NODES/${pvnode[$vm_id]}/$QEMU/$vm_id.conf"
+        check_unique_disk_config "$file_config"
+        end_process 255
         if [[ $(check_unique_disk_config "$file_config") -ge 1 ]]; then
             log error "VM $vm_id - Preflight check: VM $vm_id has duplicate disk entries - skipping to next VM. Check Documentation to learn how to avoid this."
             (( skipped_vm_count++ ))
